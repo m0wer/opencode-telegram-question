@@ -100,6 +100,10 @@ export function makeController(deps: ControllerDeps) {
     state.closed = true
     requests.delete(requestID)
     if (state.answeredFromTelegram) return
+    for (const promptMID of state.customPrompts.keys()) {
+      await deps.telegram.deleteMessage(deps.chatID, promptMID).catch(() => {})
+    }
+    state.customPrompts.clear()
     for (const mid of state.messageIDs) {
       messageIndex.delete(mid)
       await deps.telegram.deleteMessage(deps.chatID, mid).catch(() => {})
@@ -137,6 +141,13 @@ export function makeController(deps: ControllerDeps) {
       state.answeredFromTelegram = false
     }
     requests.delete(state.event.id)
+    // Any "Reply with your answer for..." prompts must go, whether the
+    // submit succeeded or failed: Telegram clients otherwise keep the
+    // force-reply quote pinned to the chat input.
+    for (const promptMID of state.customPrompts.keys()) {
+      await deps.telegram.deleteMessage(deps.chatID, promptMID).catch(() => {})
+    }
+    state.customPrompts.clear()
     // Strip the inline keyboards so buttons can't be re-pressed, but keep
     // the question text and any selection marks so the user sees a record
     // of what they answered. For single-choice and free-text we also edit
@@ -191,6 +202,15 @@ export function makeController(deps: ControllerDeps) {
     if (cb.data === CB.custom) {
       sub.awaitingCustom = true
       const questionMID = state.messageIDs[target.subIndex]
+      // If we already have an open prompt for this same sub-question (user
+      // tapped the button twice), retire the stale one so only one
+      // force-reply target is alive.
+      for (const [pmid, sIdx] of state.customPrompts) {
+        if (sIdx === target.subIndex) {
+          state.customPrompts.delete(pmid)
+          await deps.telegram.deleteMessage(deps.chatID, pmid).catch(() => {})
+        }
+      }
       // Send a force-reply prompt that quotes the question message so
       // Telegram pre-fills the reply target in the chat input. We then map
       // the prompt-message id back to the sub-question, so even when the
@@ -241,6 +261,7 @@ export function makeController(deps: ControllerDeps) {
         const idx = state.customPrompts.get(replyTo)
         if (idx === undefined) continue
         state.customPrompts.delete(replyTo)
+        await deps.telegram.deleteMessage(deps.chatID, replyTo).catch(() => {})
         applyFreeText(state, idx, msg.text)
         await trySubmit(state)
         return
@@ -251,6 +272,7 @@ export function makeController(deps: ControllerDeps) {
       if (state.customPrompts.size === 0) continue
       const [promptMID, idx] = state.customPrompts.entries().next().value!
       state.customPrompts.delete(promptMID)
+      await deps.telegram.deleteMessage(deps.chatID, promptMID).catch(() => {})
       applyFreeText(state, idx, msg.text)
       await trySubmit(state)
       return

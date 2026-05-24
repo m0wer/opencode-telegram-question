@@ -123,6 +123,7 @@ describe("controller — free-text answer", () => {
       },
     })
     expect(replies).toEqual([{ requestID: "q1", answers: [["made up answer"]] }])
+    expect(prompt.deleted).toBe(true)
   })
 
   test("routes concurrent custom prompts via reply_to_message", async () => {
@@ -159,6 +160,78 @@ describe("controller — free-text answer", () => {
       message: { message_id: 11, chat: { id: CHAT }, text: "answer one", reply_to_message: { message_id: prompt1.message_id } },
     })
     expect(replies).toEqual([{ requestID: "q1", answers: [["answer one"], ["answer two"]] }])
+    expect(prompt1.deleted).toBe(true)
+    expect(prompt2.deleted).toBe(true)
+  })
+
+  test("retires the previous prompt when the user re-taps the custom button", async () => {
+    const { telegram, controller } = setup()
+    await controller.onQuestionAsked(
+      evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
+    )
+    const mid = telegram.sent[0].message_id
+    const tap = () =>
+      controller.handleUpdate({
+        update_id: 1,
+        callback_query: { id: "c", from: { id: 1 }, message: { message_id: mid, chat: { id: CHAT } }, data: CB.custom },
+      })
+    await tap()
+    const firstPrompt = telegram.sent[1]
+    await tap()
+    expect(firstPrompt.deleted).toBe(true)
+    expect(telegram.sent.length).toBe(3)
+    expect(telegram.sent[2].deleted).toBe(false)
+  })
+})
+
+describe("controller — multi sub-questions with multiple selections each", () => {
+  test("collects multi-choice answers across several sub-questions and submits once", async () => {
+    const { telegram, controller, replies } = setup()
+    await controller.onQuestionAsked(
+      evt([
+        {
+          header: "h1",
+          question: "q1",
+          multiple: true,
+          options: [
+            { label: "py", description: "" },
+            { label: "ts", description: "" },
+            { label: "go", description: "" },
+          ],
+        },
+        {
+          header: "h2",
+          question: "q2",
+          multiple: true,
+          options: [
+            { label: "linux", description: "" },
+            { label: "mac", description: "" },
+          ],
+        },
+      ]),
+    )
+    const m1 = telegram.sent[0].message_id
+    const m2 = telegram.sent[1].message_id
+    const fire = (mid: number, data: string) =>
+      controller.handleUpdate({
+        update_id: 1,
+        callback_query: { id: "x", from: { id: 1 }, message: { message_id: mid, chat: { id: CHAT } }, data },
+      })
+    // Interleave picks across sub-questions to prove independence.
+    await fire(m1, CB.option(0))
+    await fire(m2, CB.option(1))
+    await fire(m1, CB.option(2))
+    expect(replies).toEqual([])
+    await fire(m2, CB.done)
+    expect(replies).toEqual([])
+    await fire(m1, CB.done)
+    expect(replies).toEqual([{ requestID: "q1", answers: [["py", "go"], ["mac"]] }])
+    // Both messages stay (Telegram-source answer), with chosen marks visible.
+    expect(telegram.sent[0].deleted).toBe(false)
+    expect(telegram.sent[1].deleted).toBe(false)
+    expect(telegram.sent[0].text).toContain("\u2705 1. py")
+    expect(telegram.sent[0].text).toContain("\u2705 3. go")
+    expect(telegram.sent[1].text).toContain("\u2705 2. mac")
   })
 })
 
@@ -216,6 +289,25 @@ describe("controller — cancel", () => {
     expect(rejects).toEqual(["q1"])
     expect(replies).toEqual([])
     expect(telegram.sent[0].deleted).toBe(true)
+  })
+
+  test("cancel also removes any open force-reply prompt", async () => {
+    const { telegram, controller, rejects } = setup()
+    await controller.onQuestionAsked(
+      evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
+    )
+    const mid = telegram.sent[0].message_id
+    await controller.handleUpdate({
+      update_id: 1,
+      callback_query: { id: "c", from: { id: 1 }, message: { message_id: mid, chat: { id: CHAT } }, data: CB.custom },
+    })
+    const promptMID = telegram.sent[1].message_id
+    await controller.handleUpdate({
+      update_id: 2,
+      callback_query: { id: "c2", from: { id: 1 }, message: { message_id: mid, chat: { id: CHAT } }, data: CB.cancel },
+    })
+    expect(rejects).toEqual(["q1"])
+    expect(telegram.sent.find((m) => m.message_id === promptMID)?.deleted).toBe(true)
   })
 })
 
