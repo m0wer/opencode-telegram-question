@@ -1,0 +1,154 @@
+import { describe, expect, test } from "bun:test"
+import { renderQuestion, renderAnsweredQuestion, selectionToAnswer, renderTranscript, clip, CB } from "../src/render"
+
+describe("renderQuestion", () => {
+  test("renders header, question, options, and one keyboard button per option plus custom and cancel", () => {
+    const r = renderQuestion(
+      {
+        header: "Pick color",
+        question: "Which color?",
+        options: [
+          { label: "red", description: "warm" },
+          { label: "blue", description: "cool" },
+        ],
+      },
+      { index: 0, total: 1, selected: new Set() },
+    )
+    expect(r.text).toContain("Pick color")
+    expect(r.text).toContain("Which color?")
+    expect(r.text).toContain("\u26AA 1. red")
+    expect(r.text).toContain("\u26AA 2. blue")
+    // 2 option rows + custom + cancel
+    expect(r.keyboard).toHaveLength(4)
+    expect(r.keyboard[0][0].callback_data).toBe(CB.option(0))
+    expect(r.keyboard[2][0].callback_data).toBe(CB.custom)
+    expect(r.keyboard[3][0].callback_data).toBe(CB.cancel)
+  })
+
+  test("omits custom row when custom is false", () => {
+    const r = renderQuestion(
+      { header: "h", question: "q", options: [{ label: "a", description: "" }], custom: false },
+      { index: 0, total: 1, selected: new Set() },
+    )
+    // only 1 option + cancel
+    expect(r.keyboard.flat().some((b) => b.callback_data === CB.custom)).toBe(false)
+  })
+
+  test("adds done button only for multiple", () => {
+    const single = renderQuestion(
+      { header: "h", question: "q", options: [{ label: "a", description: "" }] },
+      { index: 0, total: 1, selected: new Set() },
+    )
+    const multi = renderQuestion(
+      { header: "h", question: "q", options: [{ label: "a", description: "" }], multiple: true },
+      { index: 0, total: 1, selected: new Set() },
+    )
+    expect(single.keyboard.flat().some((b) => b.callback_data === CB.done)).toBe(false)
+    expect(multi.keyboard.flat().some((b) => b.callback_data === CB.done)).toBe(true)
+  })
+
+  test("shows selected marks", () => {
+    const r = renderQuestion(
+      {
+        header: "h",
+        question: "q",
+        options: [
+          { label: "a", description: "" },
+          { label: "b", description: "" },
+        ],
+        multiple: true,
+      },
+      { index: 0, total: 1, selected: new Set([1]) },
+    )
+    expect(r.text).toContain("\u26AA 1. a")
+    expect(r.text).toContain("\u2705 2. b")
+    expect(r.keyboard[1][0].text.startsWith("\u2705 ")).toBe(true)
+  })
+
+  test("prepends recent context transcript when provided", () => {
+    const r = renderQuestion(
+      { header: "h", question: "q", options: [] },
+      { index: 0, total: 1, selected: new Set(), transcript: "user: hi\nassistant: hello" },
+    )
+    expect(r.text.startsWith("Recent context:")).toBe(true)
+    expect(r.text).toContain("assistant: hello")
+  })
+})
+
+describe("selectionToAnswer", () => {
+  test("returns custom text wrapped when custom is provided", () => {
+    expect(
+      selectionToAnswer(
+        { header: "h", question: "q", options: [{ label: "x", description: "" }] },
+        new Set([0]),
+        "freeform",
+      ),
+    ).toEqual(["freeform"])
+  })
+  test("returns selected labels sorted by option index", () => {
+    expect(
+      selectionToAnswer(
+        {
+          header: "h",
+          question: "q",
+          options: [
+            { label: "a", description: "" },
+            { label: "b", description: "" },
+            { label: "c", description: "" },
+          ],
+        },
+        new Set([2, 0]),
+      ),
+    ).toEqual(["a", "c"])
+  })
+})
+
+describe("renderTranscript", () => {
+  test("keeps only the last N messages and trims whitespace", () => {
+    const out = renderTranscript(
+      [
+        { role: "user", text: "one  two\nthree" },
+        { role: "assistant", text: "ok" },
+        { role: "user", text: "again" },
+      ],
+      2,
+    )
+    expect(out).not.toContain("one")
+    expect(out).toContain("assistant: ok")
+    expect(out).toContain("user: again")
+  })
+})
+
+describe("renderAnsweredQuestion", () => {
+  test("marks the chosen option and adds an answered marker", () => {
+    const r = renderAnsweredQuestion(
+      {
+        header: "h",
+        question: "q",
+        options: [
+          { label: "a", description: "" },
+          { label: "b", description: "" },
+        ],
+      },
+      { index: 0, total: 1, selected: new Set([1]) },
+    )
+    expect(r.text).toContain("\u26AA 1. a")
+    expect(r.text).toContain("\u2705 2. b")
+    expect(r.text).toContain("Answered from Telegram")
+  })
+  test("appends the custom answer when provided", () => {
+    const r = renderAnsweredQuestion(
+      { header: "h", question: "q", options: [{ label: "a", description: "" }] },
+      { index: 0, total: 1, selected: new Set(), customAnswer: "hello world" },
+    )
+    expect(r.text).toContain("Your answer: hello world")
+    expect(r.text).not.toContain("Answered from Telegram")
+  })
+})
+
+describe("clip", () => {
+  test("truncates with ellipsis", () => {
+    expect(clip("abcdef", 4)).toBe("abc\u2026")
+    expect(clip("abc", 10)).toBe("abc")
+  })
+})

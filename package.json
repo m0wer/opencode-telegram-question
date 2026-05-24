@@ -1,0 +1,47 @@
+{
+  "name": "opencode-telegram-question",
+  "version": "0.1.0",
+  "description": "Mirror opencode's question tool to a Telegram bot so you can answer from anywhere",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "bun build ./src/index.ts --outfile ./dist/index.js --target node --format esm --external @opencode-ai/plugin --external @opencode-ai/sdk",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@opencode-ai/sdk": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@opencode-ai/sdk": "*",
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  },
+  "keywords": ["opencode", "plugin", "telegram", "afk", "remote", "question"],
+  "license": "MIT",
+  "author": "m0wer",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/m0wer/opencode-telegram-question.git"
+  },
+  "bugs": {
+    "url": "https://github.com/m0wer/opencode-telegram-question/issues"
+  },
+  "homepage": "https://github.com/m0wer/opencode-telegram-question#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}
