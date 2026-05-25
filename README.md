@@ -113,6 +113,7 @@ Options:
 | `botToken` | `TELEGRAM_BOT_TOKEN` | (required) | From [@BotFather](https://t.me/BotFather) |
 | `chatId` | `TELEGRAM_CHAT_ID` | (required) | Your numeric user id from [@userinfobot](https://t.me/userinfobot) |
 | `historyMessages` | `OPENCODE_TELEGRAM_HISTORY` | `3` | Lines of recent history prepended to the first sub-question |
+| `logFile` | (n/a) | platform default | Path to the plugin log file. Defaults to `$XDG_STATE_HOME/opencode-telegram-question/plugin.log` (POSIX) or `%LOCALAPPDATA%\opencode-telegram-question\plugin.log` (Windows). The plugin never writes to stdout/stderr, so the TUI stays clean; tail this file when debugging. |
 
 If either credential is missing the plugin disables itself (with a warning)
 and the CLI/TUI flow is unchanged.

@@ -614,19 +614,67 @@ function sleep(ms, signal) {
   });
 }
 
+// src/log.ts
+import { appendFile, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import path2 from "node:path";
+function defaultLogDir() {
+  if (process.platform === "win32") {
+    return path2.join(process.env.LOCALAPPDATA ?? path2.join(homedir(), "AppData", "Local"), "opencode-telegram-question");
+  }
+  const xdg = process.env.XDG_STATE_HOME;
+  if (xdg)
+    return path2.join(xdg, "opencode-telegram-question");
+  return path2.join(homedir(), ".local", "state", "opencode-telegram-question");
+}
+function defaultLogFile() {
+  return path2.join(defaultLogDir(), "plugin.log");
+}
+function makeFileLogger(file = defaultLogFile()) {
+  const dir = path2.dirname(file);
+  let ready;
+  const ensure = () => {
+    if (!ready)
+      ready = mkdir(dir, { recursive: true }).then(() => {
+        return;
+      }).catch(() => {
+        return;
+      });
+    return ready;
+  };
+  return (level, msg, data) => {
+    const pid = process.pid;
+    const ts = new Date().toISOString();
+    const line = data === undefined ? `${ts} [pid ${pid}] ${level} ${msg}
+` : `${ts} [pid ${pid}] ${level} ${msg} ${safeStringify(data)}
+`;
+    ensure().then(() => appendFile(file, line).catch(() => {
+      return;
+    }));
+  };
+}
+function safeStringify(v) {
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
 // src/index.ts
 var TelegramQuestionPlugin = async (input, options) => {
   const opts = options ?? {};
   const token = opts.botToken ?? process.env.TELEGRAM_BOT_TOKEN;
   const chatIdRaw = opts.chatId ?? process.env.TELEGRAM_CHAT_ID;
   const historyMessages = opts.historyMessages ?? Number(process.env.OPENCODE_TELEGRAM_HISTORY ?? 3);
+  const log = makeFileLogger(opts.logFile ?? defaultLogFile());
   if (!token || chatIdRaw === undefined || chatIdRaw === "") {
-    console.warn("[telegram-question] disabled: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID (set in opencode.json plugin options or env)");
+    log("warn", "disabled: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID (set in opencode.json plugin options or env)");
     return {};
   }
   const chatID = typeof chatIdRaw === "number" ? chatIdRaw : Number(chatIdRaw);
   if (!Number.isFinite(chatID)) {
-    console.warn(`[telegram-question] disabled: invalid chatId ${chatIdRaw}`);
+    log("warn", "disabled: invalid chatId", { chatId: chatIdRaw });
     return {};
   }
   const telegram = opts.telegram ?? makeTelegramClient(token);
@@ -681,33 +729,10 @@ var TelegramQuestionPlugin = async (input, options) => {
       }
       throw new Error("No way to POST to question reject endpoint");
     },
-    log: (level, msg, data) => {
-      const line = `[telegram-question] ${msg}` + (data ? " " + JSON.stringify(data) : "");
-      if (level === "error")
-        console.error(line);
-      else if (level === "warn")
-        console.warn(line);
-      else
-        console.log(line);
-    }
+    log
   });
   const abort = new AbortController;
-  runCoordinator({
-    telegram,
-    token,
-    signal: abort.signal,
-    log: (level, msg, data) => {
-      const line = `[telegram-question] ${msg}` + (data ? " " + JSON.stringify(data) : "");
-      if (level === "error")
-        console.error(line);
-      else if (level === "warn")
-        console.warn(line);
-      else
-        console.log(line);
-    }
-  }, (u) => controller.handleUpdate(u).catch((err) => {
-    console.error("[telegram-question] handler error", err);
-  })).catch((err) => console.error("[telegram-question] coordinator stopped", err));
+  runCoordinator({ telegram, token, signal: abort.signal, log }, (u) => controller.handleUpdate(u).catch((err) => log("error", "handler error", String(err)))).catch((err) => log("error", "coordinator stopped", String(err)));
   process.once?.("beforeExit", () => abort.abort());
   return {
     event: async ({ event }) => {
@@ -715,7 +740,7 @@ var TelegramQuestionPlugin = async (input, options) => {
       switch (e.type) {
         case "question.asked": {
           const props = e.properties;
-          await controller.onQuestionAsked(props).catch((err) => console.error("[telegram-question] asked error", err));
+          await controller.onQuestionAsked(props).catch((err) => log("error", "asked error", String(err)));
           return;
         }
         case "question.replied":
