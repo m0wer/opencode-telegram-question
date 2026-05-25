@@ -56,30 +56,13 @@ as `chatId` for a private 1:1 chat with your own bot.
 
 ### 3. Install the plugin
 
-Option A: drop-in file (no npm publish required, recommended for now).
-
-```bash
-git clone https://github.com/m0wer/opencode-telegram-question.git
-cd opencode-telegram-question
-bun install
-bun run build
-mkdir -p ~/.config/opencode/plugin
-cp dist/index.js ~/.config/opencode/plugin/telegram-question.js
-```
-
-opencode auto-loads any `*.js` or `*.ts` file under
-`~/.config/opencode/plugin/`, so the file alone is enough. Auto-discovered
-plugins can't receive inline options, so use the environment variables in
-step 4 for this option (or switch to Option B if you prefer inline config).
-
-Option B: reference the built file by absolute path from `opencode.json`.
+Add it to `~/.config/opencode/opencode.json`:
 
 ```jsonc
-// ~/.config/opencode/opencode.json
 {
   "plugin": [
     [
-      "/absolute/path/to/opencode-telegram-question/dist/index.js",
+      "github:m0wer/opencode-telegram-question",
       {
         "botToken": "123456:AA...",
         "chatId": 987654321,
@@ -90,22 +73,24 @@ Option B: reference the built file by absolute path from `opencode.json`.
 }
 ```
 
-Option C: install from npm (once published).
+opencode resolves the spec through npm, which fetches the repo straight from
+GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.1.0`.
+
+For local development, clone and reference the built file directly:
 
 ```bash
-bun add -d opencode-telegram-question
+git clone https://github.com/m0wer/opencode-telegram-question.git
+cd opencode-telegram-question
+bun install
+bun run build
 ```
 
 ```jsonc
 {
   "plugin": [
     [
-      "opencode-telegram-question",
-      {
-        "botToken": "123456:AA...",
-        "chatId": 987654321,
-        "historyMessages": 3
-      }
+      "/absolute/path/to/opencode-telegram-question/dist/index.js",
+      { "botToken": "...", "chatId": 0 }
     ]
   ]
 }
