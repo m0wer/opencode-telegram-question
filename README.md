@@ -1,8 +1,9 @@
 # opencode-telegram-question
 
-Mirror opencode's built-in `question` tool to a Telegram bot. When opencode
-asks you something while you're AFK, answer it from your phone. The CLI
-session keeps working as if you'd answered locally.
+Mirror opencode's built-in `question` tool and permission prompts to a
+Telegram bot. When opencode pauses for input while you're AFK, answer it
+from your phone. The CLI session keeps working as if you'd answered
+locally.
 
 <p align="left">
   <img src="docs/demo.webp" alt="Demo: a Telegram chat receives an opencode question, the user taps an option, and the opencode TUI on the desktop picks up the answer in real time." width="50%">
@@ -16,6 +17,8 @@ keep working across minor opencode upgrades.
 
 ## How it works
 
+### Questions
+
 1. opencode's `question` tool publishes `question.asked` on the internal bus
    with the full request (including sub-questions, options, `multiple` and
    `custom` flags).
@@ -23,21 +26,41 @@ keep working across minor opencode upgrades.
    message per sub-question, with inline-keyboard buttons for each option
    plus a "Type your own answer" entry and a "Cancel" entry. The first
    message also includes a short transcript of the last few session messages
-   for context.
+   for context (text, reasoning, and tool titles).
 3. When you tap a button (or send a free-text reply), the plugin assembles
    the answer array and calls `POST /question/{id}/reply` via the SDK
    client. opencode unblocks the tool and the session continues. The
    Telegram message is edited in place: chosen options are marked with
-   `(check)` and the inline keyboard is removed, so you keep a record of what
-   you answered.
+   `(check)` and the inline keyboard is removed, so you keep a record of
+   what you answered.
 4. If you answer in the CLI/TUI instead, the bus emits `question.replied`
-   (or `question.rejected`), and the plugin deletes its Telegram messages so
-   you don't see stale buttons.
+   (or `question.rejected`), and the plugin deletes its Telegram messages
+   so you don't see stale buttons.
+
+### Permissions
+
+When a tool needs your approval, opencode publishes `permission.asked`.
+The plugin renders the tool name, requested patterns, and any metadata as
+a chat message with three inline buttons: **Allow once**, **Always
+allow**, **Reject**. Tapping a button calls `POST /permission/{id}/reply`
+and the blocked tool resumes. As with questions, CLI/TUI approvals
+delete the now-stale chat message via the `permission.replied` event.
+
+### Free text and the "Draft:" indicator
 
 Free-text answers use Telegram's `force_reply`, so tapping "Type your own
 answer" pops the reply composer pre-quoted to the question. Concurrent
-custom prompts (one per sub-question) are routed back to the correct slot
-via `reply_to_message_id`.
+custom prompts (one per sub-question) are routed back to the correct
+slot via `reply_to_message_id`.
+
+A side effect of `force_reply` is that Telegram clients mark the chat
+with "Draft:" in the chat list as soon as the prompt is sent, even
+before you type anything. The Bot API offers no method to clear that
+indicator; the plugin minimizes it by (a) only arming `force_reply`
+*after* you tap "Type your own answer", and (b) deleting the force-reply
+prompt as soon as the question resolves. Inline-button-only flows
+(questions without `custom`, and all permission prompts) never trigger
+the indicator.
 
 Multi-question calls are supported: every sub-question gets its own
 message, and the plugin only replies to opencode once all sub-questions
@@ -80,7 +103,7 @@ Add it to `~/.config/opencode/opencode.json`:
 ```
 
 opencode resolves the spec through npm, which fetches the repo straight from
-GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.1.0`.
+GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.2.0`.
 
 For local development, clone and reference the built file directly:
 
@@ -159,4 +182,6 @@ bun run build
 Tests cover: single-choice, multi-choice, free-text with `force_reply`,
 concurrent custom-prompt routing via `reply_to_message`, multi sub-question
 ordering, cancel/reject, CLI-answers-first cleanup, message edit-on-answer
-behavior, and chat-id isolation.
+behavior, chat-id isolation, multi-session IPC leader election and
+broadcast, history part summarization (text/reasoning/tool titles), and
+permission allow-once/always/reject flows.

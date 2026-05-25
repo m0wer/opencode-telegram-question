@@ -150,6 +150,31 @@ function renderTranscript(messages, max) {
   return messages.slice(-max).map((m) => `${m.role}: ${clip(m.text.replace(/\s+/g, " ").trim(), 240)}`).join(`
 `);
 }
+function summarizePart(part) {
+  if (!part || typeof part !== "object")
+    return "";
+  switch (part.type) {
+    case "text":
+    case "reasoning":
+      return typeof part.text === "string" ? part.text : "";
+    case "tool": {
+      const name = typeof part.tool === "string" ? part.tool : "tool";
+      const title = part.state?.title;
+      if (typeof title === "string" && title)
+        return `[${name}: ${title}]`;
+      const status = part.state?.status;
+      return status ? `[${name} ${status}]` : `[${name}]`;
+    }
+    case "file":
+      return part.filename ? `[file: ${part.filename}]` : "[file]";
+    case "agent":
+      return part.name ? `[agent: ${part.name}]` : "[agent]";
+    case "subtask":
+      return typeof part.description === "string" ? `[subtask: ${part.description}]` : "[subtask]";
+    default:
+      return "";
+  }
+}
 
 // src/controller.ts
 var TELEGRAM_MAX = 4000;
@@ -341,6 +366,124 @@ function makeController(deps) {
       return handleMessage(update);
   }
   return { onQuestionAsked, onQuestionResolved, handleUpdate, _state: { requests, messageIndex } };
+}
+
+// src/permission.ts
+var TELEGRAM_MAX2 = 4000;
+var PERMISSION_CB = {
+  once: "p:once",
+  always: "p:always",
+  reject: "p:reject"
+};
+function renderPermission(req) {
+  const lines = [];
+  lines.push("Permission requested");
+  lines.push("");
+  lines.push(`Tool: ${req.permission}`);
+  if (req.patterns && req.patterns.length) {
+    lines.push("");
+    lines.push("Patterns:");
+    for (const p of req.patterns.slice(0, 8))
+      lines.push(`  ${p}`);
+    if (req.patterns.length > 8)
+      lines.push(`  ...and ${req.patterns.length - 8} more`);
+  }
+  if (req.metadata && Object.keys(req.metadata).length) {
+    lines.push("");
+    lines.push("Details:");
+    for (const [k, v] of Object.entries(req.metadata).slice(0, 8)) {
+      const sv = typeof v === "string" ? v : JSON.stringify(v);
+      lines.push(`  ${k}: ${clip(sv, 200)}`);
+    }
+  }
+  const keyboard = [
+    [
+      { text: "Allow once", callback_data: PERMISSION_CB.once },
+      { text: "Always allow", callback_data: PERMISSION_CB.always }
+    ],
+    [{ text: "Reject", callback_data: PERMISSION_CB.reject }]
+  ];
+  return { text: lines.join(`
+`), keyboard };
+}
+function renderResolvedPermission(req, choice) {
+  const lines = [];
+  lines.push("Permission requested");
+  lines.push("");
+  lines.push(`Tool: ${req.permission}`);
+  if (req.patterns && req.patterns.length) {
+    lines.push("");
+    for (const p of req.patterns.slice(0, 8))
+      lines.push(`  ${p}`);
+  }
+  lines.push("");
+  const verb = choice === "reject" ? "❌ Rejected" : choice === "always" ? "✅ Allowed (always)" : "✅ Allowed once";
+  lines.push(`${verb} from Telegram`);
+  return lines.join(`
+`);
+}
+function makePermissionController(deps) {
+  const requests = new Map;
+  const messageIndex = new Map;
+  const log = deps.log ?? (() => {});
+  async function onPermissionAsked(req) {
+    log("info", "permission.asked", { id: req.id, permission: req.permission });
+    const { text, keyboard } = renderPermission(req);
+    const sent = await deps.telegram.sendMessage(deps.chatID, clip(text, TELEGRAM_MAX2), keyboard);
+    requests.set(req.id, {
+      request: req,
+      messageID: sent.message_id,
+      closed: false,
+      resolvedFromTelegram: false
+    });
+    messageIndex.set(sent.message_id, req.id);
+  }
+  async function onPermissionResolved(requestID) {
+    const state = requests.get(requestID);
+    if (!state || state.closed)
+      return;
+    state.closed = true;
+    requests.delete(requestID);
+    messageIndex.delete(state.messageID);
+    if (state.resolvedFromTelegram)
+      return;
+    await deps.telegram.deleteMessage(deps.chatID, state.messageID).catch(() => {});
+  }
+  async function handleCallback(update) {
+    const cb = update.callback_query;
+    if (!cb || !cb.message || !cb.data)
+      return false;
+    if (cb.message.chat.id !== deps.chatID)
+      return false;
+    const requestID = messageIndex.get(cb.message.message_id);
+    if (!requestID)
+      return false;
+    const state = requests.get(requestID);
+    if (!state) {
+      await deps.telegram.answerCallback(cb.id).catch(() => {});
+      return true;
+    }
+    const choice = cb.data === PERMISSION_CB.once ? "once" : cb.data === PERMISSION_CB.always ? "always" : cb.data === PERMISSION_CB.reject ? "reject" : undefined;
+    if (!choice)
+      return false;
+    await deps.telegram.answerCallback(cb.id).catch(() => {});
+    state.closed = true;
+    state.resolvedFromTelegram = true;
+    requests.delete(requestID);
+    messageIndex.delete(state.messageID);
+    try {
+      await deps.reply(requestID, choice);
+    } catch (err) {
+      log("warn", "permission reply failed (likely already resolved)", String(err));
+      await deps.telegram.deleteMessage(deps.chatID, state.messageID).catch(() => {});
+      return true;
+    }
+    const finalText = renderResolvedPermission(state.request, choice);
+    await deps.telegram.editMessage(deps.chatID, state.messageID, clip(finalText, TELEGRAM_MAX2)).catch(() => {});
+    await deps.telegram.removeKeyboard(deps.chatID, state.messageID).catch(() => {});
+    return true;
+  }
+  return { onPermissionAsked, onPermissionResolved, handleCallback, _state: { requests, messageIndex } };
 }
 
 // src/ipc.ts
@@ -685,18 +828,30 @@ var TelegramQuestionPlugin = async (input, options) => {
     fetchHistory: async (sessionID) => {
       const anyClient = input.client;
       const sessionAPI = anyClient?.session;
-      const messagesAPI = sessionAPI?.messages ?? sessionAPI?.message;
-      if (!messagesAPI || typeof messagesAPI.list !== "function")
+      const messages = sessionAPI?.messages;
+      if (typeof messages !== "function") {
+        log("warn", "session.messages SDK method not found", { keys: sessionAPI ? Object.keys(sessionAPI) : null });
         return [];
-      const res = await messagesAPI.list({ sessionID }).catch(() => {
-        return;
-      });
-      const data = res?.data ?? res ?? [];
+      }
+      const tryShapes = [{ sessionID }, { path: { id: sessionID } }];
+      let res;
+      for (const args of tryShapes) {
+        res = await messages.call(sessionAPI, args).catch(() => {
+          return;
+        });
+        if (res !== undefined)
+          break;
+      }
+      if (res === undefined) {
+        log("warn", "session.messages returned no data for either SDK shape");
+        return [];
+      }
+      const data = Array.isArray(res) ? res : res?.data ?? res?.items ?? [];
       const out = [];
       for (const m of data) {
         const info = m.info ?? m;
         const parts = m.parts ?? info?.parts ?? [];
-        const text = parts.map((p) => p?.type === "text" ? p.text : "").filter(Boolean).join(" ");
+        const text = parts.map((p) => summarizePart(p)).filter(Boolean).join(" ");
         if (text)
           out.push({ role: info?.role ?? "?", text });
       }
@@ -731,8 +886,37 @@ var TelegramQuestionPlugin = async (input, options) => {
     },
     log
   });
+  const permissionController = makePermissionController({
+    telegram,
+    chatID,
+    reply: async (requestID, choice) => {
+      const client = input.client;
+      if (client?.permission?.reply) {
+        await client.permission.reply({ requestID, reply: choice });
+        return;
+      }
+      if (client?._client?.post) {
+        await client._client.post({
+          url: `/permission/${encodeURIComponent(requestID)}/reply`,
+          body: { reply: choice }
+        });
+        return;
+      }
+      throw new Error("No way to POST to permission reply endpoint");
+    },
+    log
+  });
   const abort = new AbortController;
-  runCoordinator({ telegram, token, signal: abort.signal, log }, (u) => controller.handleUpdate(u).catch((err) => log("error", "handler error", String(err)))).catch((err) => log("error", "coordinator stopped", String(err)));
+  runCoordinator({ telegram, token, signal: abort.signal, log }, async (u) => {
+    try {
+      const claimed = await permissionController.handleCallback(u);
+      if (claimed)
+        return;
+    } catch (err) {
+      log("error", "permission handler error", String(err));
+    }
+    await controller.handleUpdate(u).catch((err) => log("error", "handler error", String(err)));
+  }).catch((err) => log("error", "coordinator stopped", String(err)));
   process.once?.("beforeExit", () => abort.abort());
   return {
     event: async ({ event }) => {
@@ -748,6 +932,17 @@ var TelegramQuestionPlugin = async (input, options) => {
           const props = e.properties;
           if (props?.requestID)
             await controller.onQuestionResolved(props.requestID).catch(() => {});
+          return;
+        }
+        case "permission.asked": {
+          const props = e.properties;
+          await permissionController.onPermissionAsked(props).catch((err) => log("error", "permission asked error", String(err)));
+          return;
+        }
+        case "permission.replied": {
+          const props = e.properties;
+          if (props?.requestID)
+            await permissionController.onPermissionResolved(props.requestID).catch(() => {});
           return;
         }
       }
