@@ -15,7 +15,8 @@
   "scripts": {
     "build": "bun build ./src/index.ts --outfile ./dist/index.js --target node --format esm --external @opencode-ai/plugin --external @opencode-ai/sdk",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "prepublishOnly": "bun run build"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "*",
