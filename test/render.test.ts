@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { renderQuestion, renderAnsweredQuestion, selectionToAnswer, renderTranscript, clip, CB } from "../src/render"
+import { renderQuestion, renderAnsweredQuestion, selectionToAnswer, renderTranscript, clip, summarizePart, CB } from "../src/render"
 
 describe("renderQuestion", () => {
   test("renders header, question, options, and one keyboard button per option plus custom and cancel", () => {
@@ -150,5 +150,32 @@ describe("clip", () => {
   test("truncates with ellipsis", () => {
     expect(clip("abcdef", 4)).toBe("abc\u2026")
     expect(clip("abc", 10)).toBe("abc")
+  })
+})
+
+describe("summarizePart", () => {
+  test("text and reasoning return their text", () => {
+    expect(summarizePart({ type: "text", text: "hello" })).toBe("hello")
+    expect(summarizePart({ type: "reasoning", text: "thinking" })).toBe("thinking")
+  })
+  test("tool prefers state.title, falls back to status, then bare name", () => {
+    expect(summarizePart({ type: "tool", tool: "bash", state: { title: "ls -la", status: "completed" } })).toBe("[bash: ls -la]")
+    expect(summarizePart({ type: "tool", tool: "read", state: { status: "running" } })).toBe("[read running]")
+    expect(summarizePart({ type: "tool", tool: "edit", state: {} })).toBe("[edit]")
+  })
+  test("file uses filename, agent uses name, subtask uses description", () => {
+    expect(summarizePart({ type: "file", filename: "a.ts" })).toBe("[file: a.ts]")
+    expect(summarizePart({ type: "agent", name: "sub" })).toBe("[agent: sub]")
+    expect(summarizePart({ type: "subtask", description: "lookup" })).toBe("[subtask: lookup]")
+  })
+  test("uninteresting parts return empty string", () => {
+    expect(summarizePart({ type: "step-start" })).toBe("")
+    expect(summarizePart({ type: "step-finish", reason: "done" })).toBe("")
+    expect(summarizePart({ type: "snapshot", snapshot: "x" })).toBe("")
+    expect(summarizePart({ type: "patch", hash: "h", files: [] })).toBe("")
+    expect(summarizePart({ type: "compaction", auto: true })).toBe("")
+    expect(summarizePart({ type: "retry", attempt: 1 })).toBe("")
+    expect(summarizePart(null)).toBe("")
+    expect(summarizePart(undefined)).toBe("")
   })
 })

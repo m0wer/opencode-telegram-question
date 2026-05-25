@@ -18,6 +18,7 @@ import { makeTelegramClient, type TelegramClient } from "./telegram"
 import { makeController, type QuestionEvent } from "./controller"
 import { runCoordinator } from "./coordinator"
 import { defaultLogFile, makeFileLogger } from "./log"
+import { summarizePart } from "./render"
 
 type Options = {
   botToken?: string
@@ -54,21 +55,33 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
     chatID,
     historyMessages,
     fetchHistory: async (sessionID) => {
-      // Best-effort: tolerate SDK shape drift across opencode versions.
+      // Best-effort: tolerate SDK shape drift across opencode versions. The
+      // method is `client.session.messages(...)` (not `.messages.list`).
+      // v1 SDK takes `{ path: { id } }`; the v2 SDK takes `{ sessionID }`.
+      // The response is a bare `Array<{ info, parts }>`, no `data` wrapper.
       const anyClient = input.client as any
       const sessionAPI = anyClient?.session
-      const messagesAPI = sessionAPI?.messages ?? sessionAPI?.message
-      if (!messagesAPI || typeof messagesAPI.list !== "function") return []
-      const res = await messagesAPI.list({ sessionID }).catch(() => undefined)
-      const data: any[] = (res as any)?.data ?? (res as any) ?? []
+      const messages = sessionAPI?.messages
+      if (typeof messages !== "function") {
+        log("warn", "session.messages SDK method not found", { keys: sessionAPI ? Object.keys(sessionAPI) : null })
+        return []
+      }
+      const tryShapes: any[] = [{ sessionID }, { path: { id: sessionID } }]
+      let res: any
+      for (const args of tryShapes) {
+        res = await messages.call(sessionAPI, args).catch(() => undefined)
+        if (res !== undefined) break
+      }
+      if (res === undefined) {
+        log("warn", "session.messages returned no data for either SDK shape")
+        return []
+      }
+      const data: any[] = Array.isArray(res) ? res : res?.data ?? res?.items ?? []
       const out: { role: string; text: string }[] = []
       for (const m of data) {
         const info = m.info ?? m
-        const parts = m.parts ?? info?.parts ?? []
-        const text = parts
-          .map((p: any) => (p?.type === "text" ? p.text : ""))
-          .filter(Boolean)
-          .join(" ")
+        const parts: any[] = m.parts ?? info?.parts ?? []
+        const text = parts.map((p) => summarizePart(p)).filter(Boolean).join(" ")
         if (text) out.push({ role: info?.role ?? "?", text })
       }
       return out

@@ -120,3 +120,31 @@ export function renderTranscript(
     .map((m) => `${m.role}: ${clip(m.text.replace(/\s+/g, " ").trim(), 240)}`)
     .join("\n")
 }
+
+// Extract a short human-readable summary from any opencode message Part.
+// Returns "" for parts that carry no useful text (step-start, snapshot,
+// patch, compaction, retry without message). The result is meant to be
+// joined with spaces and then truncated; do not include newlines.
+export function summarizePart(part: any): string {
+  if (!part || typeof part !== "object") return ""
+  switch (part.type) {
+    case "text":
+    case "reasoning":
+      return typeof part.text === "string" ? part.text : ""
+    case "tool": {
+      const name = typeof part.tool === "string" ? part.tool : "tool"
+      const title = part.state?.title
+      if (typeof title === "string" && title) return `[${name}: ${title}]`
+      const status = part.state?.status
+      return status ? `[${name} ${status}]` : `[${name}]`
+    }
+    case "file":
+      return part.filename ? `[file: ${part.filename}]` : "[file]"
+    case "agent":
+      return part.name ? `[agent: ${part.name}]` : "[agent]"
+    case "subtask":
+      return typeof part.description === "string" ? `[subtask: ${part.description}]` : "[subtask]"
+    default:
+      return ""
+  }
+}
