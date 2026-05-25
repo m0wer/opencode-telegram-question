@@ -8,11 +8,16 @@
 //   TELEGRAM_BOT_TOKEN
 //   TELEGRAM_CHAT_ID
 //   OPENCODE_TELEGRAM_HISTORY  (optional, default 3)
+//
+// All log output is appended to a file under the user's state directory
+// (XDG_STATE_HOME on POSIX, LOCALAPPDATA on Windows) so the opencode TUI
+// stays clean. Tail the file to see what the plugin is doing.
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { makeTelegramClient, type TelegramClient } from "./telegram"
 import { makeController, type QuestionEvent } from "./controller"
 import { runCoordinator } from "./coordinator"
+import { defaultLogFile, makeFileLogger } from "./log"
 
 type Options = {
   botToken?: string
@@ -20,6 +25,8 @@ type Options = {
   historyMessages?: number
   // Allow tests / advanced users to swap the transport.
   telegram?: TelegramClient
+  // Override the log file path. Default: see defaultLogFile().
+  logFile?: string
 }
 
 const TelegramQuestionPlugin: Plugin = async (input, options) => {
@@ -27,16 +34,17 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
   const token = opts.botToken ?? process.env.TELEGRAM_BOT_TOKEN
   const chatIdRaw = opts.chatId ?? process.env.TELEGRAM_CHAT_ID
   const historyMessages = opts.historyMessages ?? Number(process.env.OPENCODE_TELEGRAM_HISTORY ?? 3)
+  // Route every log line to a file so the TUI stays clean. Tail with e.g.
+  // `tail -f ~/.local/state/opencode-telegram-question/plugin.log`.
+  const log = makeFileLogger(opts.logFile ?? defaultLogFile())
 
   if (!token || chatIdRaw === undefined || chatIdRaw === "") {
-    console.warn(
-      "[telegram-question] disabled: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID (set in opencode.json plugin options or env)",
-    )
+    log("warn", "disabled: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID (set in opencode.json plugin options or env)")
     return {}
   }
   const chatID = typeof chatIdRaw === "number" ? chatIdRaw : Number(chatIdRaw)
   if (!Number.isFinite(chatID)) {
-    console.warn(`[telegram-question] disabled: invalid chatId ${chatIdRaw}`)
+    log("warn", "disabled: invalid chatId", { chatId: chatIdRaw })
     return {}
   }
 
@@ -94,12 +102,7 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
       }
       throw new Error("No way to POST to question reject endpoint")
     },
-    log: (level, msg, data) => {
-      const line = `[telegram-question] ${msg}` + (data ? " " + JSON.stringify(data) : "")
-      if (level === "error") console.error(line)
-      else if (level === "warn") console.warn(line)
-      else console.log(line)
-    },
+    log,
   })
 
   // Long-poll Telegram for updates. The coordinator transparently elects
@@ -108,21 +111,9 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
   // via IPC. Each process still sends its own outbound Telegram calls.
   const abort = new AbortController()
   void runCoordinator(
-    {
-      telegram,
-      token,
-      signal: abort.signal,
-      log: (level, msg, data) => {
-        const line = `[telegram-question] ${msg}` + (data ? " " + JSON.stringify(data) : "")
-        if (level === "error") console.error(line)
-        else if (level === "warn") console.warn(line)
-        else console.log(line)
-      },
-    },
-    (u) => controller.handleUpdate(u).catch((err) => {
-      console.error("[telegram-question] handler error", err)
-    }),
-  ).catch((err) => console.error("[telegram-question] coordinator stopped", err))
+    { telegram, token, signal: abort.signal, log },
+    (u) => controller.handleUpdate(u).catch((err) => log("error", "handler error", String(err))),
+  ).catch((err) => log("error", "coordinator stopped", String(err)))
   // Best-effort shutdown if the host process exits cleanly.
   process.once?.("beforeExit", () => abort.abort())
 
@@ -132,7 +123,7 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
       switch (e.type) {
         case "question.asked": {
           const props = e.properties as QuestionEvent
-          await controller.onQuestionAsked(props).catch((err) => console.error("[telegram-question] asked error", err))
+          await controller.onQuestionAsked(props).catch((err) => log("error", "asked error", String(err)))
           return
         }
         case "question.replied":
