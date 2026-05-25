@@ -16,6 +16,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { makeTelegramClient, type TelegramClient } from "./telegram"
 import { makeController, type QuestionEvent } from "./controller"
+import { makePermissionController, type PermissionRequest } from "./permission"
 import { runCoordinator } from "./coordinator"
 import { defaultLogFile, makeFileLogger } from "./log"
 import { summarizePart } from "./render"
@@ -118,6 +119,29 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
     log,
   })
 
+  const permissionController = makePermissionController({
+    telegram,
+    chatID,
+    reply: async (requestID, choice) => {
+      // Prefer the typed namespace (newer SDKs); fall back to the deprecated
+      // session-scoped endpoint, then to the raw HTTP transport.
+      const client = input.client as any
+      if (client?.permission?.reply) {
+        await client.permission.reply({ requestID, reply: choice })
+        return
+      }
+      if (client?._client?.post) {
+        await client._client.post({
+          url: `/permission/${encodeURIComponent(requestID)}/reply`,
+          body: { reply: choice },
+        })
+        return
+      }
+      throw new Error("No way to POST to permission reply endpoint")
+    },
+    log,
+  })
+
   // Long-poll Telegram for updates. The coordinator transparently elects
   // a leader per bot token across opencode sessions on the same machine,
   // so only one process actually long-polls and the rest receive updates
@@ -125,7 +149,18 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
   const abort = new AbortController()
   void runCoordinator(
     { telegram, token, signal: abort.signal, log },
-    (u) => controller.handleUpdate(u).catch((err) => log("error", "handler error", String(err))),
+    async (u) => {
+      // Try the permission controller first; it claims the update by
+      // returning true. Falling through is normal: most updates belong to
+      // the question flow.
+      try {
+        const claimed = await permissionController.handleCallback(u)
+        if (claimed) return
+      } catch (err) {
+        log("error", "permission handler error", String(err))
+      }
+      await controller.handleUpdate(u).catch((err) => log("error", "handler error", String(err)))
+    },
   ).catch((err) => log("error", "coordinator stopped", String(err)))
   // Best-effort shutdown if the host process exits cleanly.
   process.once?.("beforeExit", () => abort.abort())
@@ -143,6 +178,16 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
         case "question.rejected": {
           const props = e.properties as { requestID: string }
           if (props?.requestID) await controller.onQuestionResolved(props.requestID).catch(() => {})
+          return
+        }
+        case "permission.asked": {
+          const props = e.properties as PermissionRequest
+          await permissionController.onPermissionAsked(props).catch((err) => log("error", "permission asked error", String(err)))
+          return
+        }
+        case "permission.replied": {
+          const props = e.properties as { requestID: string }
+          if (props?.requestID) await permissionController.onPermissionResolved(props.requestID).catch(() => {})
           return
         }
       }
