@@ -4,6 +4,12 @@ Mirror opencode's built-in `question` tool to a Telegram bot. When opencode
 asks you something while you're AFK, answer it from your phone. The CLI
 session keeps working as if you'd answered locally.
 
+<p align="left">
+  <img src="docs/demo.webp" alt="Demo: a Telegram chat receives an opencode question, the user taps an option, and the opencode TUI on the desktop picks up the answer in real time." width="50%">
+</p>
+
+For a higher-quality version with scrubbing, open [docs/demo.mp4](docs/demo.mp4).
+
 The plugin does **not** patch the opencode binary. It is a regular plugin
 that hooks into opencode's bus events and the public SDK client; it should
 keep working across minor opencode upgrades.
