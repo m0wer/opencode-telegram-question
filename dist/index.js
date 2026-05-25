@@ -250,15 +250,11 @@ function makeController(deps) {
     const cb = update.callback_query;
     if (!cb || !cb.message || !cb.data)
       return;
-    if (cb.message.chat.id !== deps.chatID) {
-      await deps.telegram.answerCallback(cb.id, "Not authorized").catch(() => {});
+    if (cb.message.chat.id !== deps.chatID)
       return;
-    }
     const target = messageIndex.get(cb.message.message_id);
-    if (!target) {
-      await deps.telegram.answerCallback(cb.id, "This question is no longer active").catch(() => {});
+    if (!target)
       return;
-    }
     const state = requests.get(target.requestID);
     if (!state) {
       await deps.telegram.answerCallback(cb.id).catch(() => {});
@@ -319,24 +315,14 @@ function makeController(deps) {
     if (!msg || msg.chat.id !== deps.chatID || !msg.text)
       return;
     const replyTo = msg.reply_to_message?.message_id;
-    if (replyTo !== undefined) {
-      for (const state of requests.values()) {
-        const idx = state.customPrompts.get(replyTo);
-        if (idx === undefined)
-          continue;
-        state.customPrompts.delete(replyTo);
-        await deps.telegram.deleteMessage(deps.chatID, replyTo).catch(() => {});
-        applyFreeText(state, idx, msg.text);
-        await trySubmit(state);
-        return;
-      }
-    }
+    if (replyTo === undefined)
+      return;
     for (const state of requests.values()) {
-      if (state.customPrompts.size === 0)
+      const idx = state.customPrompts.get(replyTo);
+      if (idx === undefined)
         continue;
-      const [promptMID, idx] = state.customPrompts.entries().next().value;
-      state.customPrompts.delete(promptMID);
-      await deps.telegram.deleteMessage(deps.chatID, promptMID).catch(() => {});
+      state.customPrompts.delete(replyTo);
+      await deps.telegram.deleteMessage(deps.chatID, replyTo).catch(() => {});
       applyFreeText(state, idx, msg.text);
       await trySubmit(state);
       return;
@@ -355,6 +341,277 @@ function makeController(deps) {
       return handleMessage(update);
   }
   return { onQuestionAsked, onQuestionResolved, handleUpdate, _state: { requests, messageIndex } };
+}
+
+// src/ipc.ts
+import { createHash } from "node:crypto";
+import { createConnection, createServer } from "node:net";
+import { access, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+function ipcPathFor(token) {
+  const id = createHash("sha256").update(token).digest("hex").slice(0, 16);
+  if (process.platform === "win32")
+    return `\\\\?\\pipe\\opencode-telegram-${id}`;
+  return path.join(tmpdir(), `opencode-telegram-${id}.sock`);
+}
+async function joinOrLead(opts) {
+  const listen = opts.netListen ?? defaultNetListen;
+  const connect = opts.netConnect ?? defaultNetConnect;
+  const unlinkStale = opts.unlinkStaleSocket ?? defaultUnlinkStale;
+  const probe = await pathExists(opts.path) ? await tryConnect(connect, opts.path) : undefined;
+  if (probe)
+    return makeFollower(probe);
+  const first = await tryListen(listen, opts.path);
+  if (first.ok)
+    return makeLeader(first.server);
+  if (first.code === "EADDRINUSE") {
+    const second = await pathExists(opts.path) ? await tryConnect(connect, opts.path) : undefined;
+    if (second)
+      return makeFollower(second);
+    await unlinkStale(opts.path).catch(() => {});
+    const third = await tryListen(listen, opts.path);
+    if (third.ok)
+      return makeLeader(third.server);
+  }
+  throw new Error(`opencode-telegram-question: cannot bind nor connect IPC at ${opts.path}: ${first.code ?? "unknown"}`);
+}
+function makeLeader(server) {
+  const peers = new Set;
+  server.on("connection", (socket) => {
+    socket.setEncoding("utf8");
+    peers.add(socket);
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      let nl;
+      while ((nl = buffer.indexOf(`
+`)) !== -1) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (!line)
+          continue;
+      }
+    });
+    const dispose = () => {
+      peers.delete(socket);
+    };
+    socket.on("close", dispose);
+    socket.on("error", dispose);
+  });
+  return {
+    role: "leader",
+    broadcast(message) {
+      const line = JSON.stringify(message) + `
+`;
+      for (const peer of peers) {
+        if (!peer.writable)
+          continue;
+        peer.write(line);
+      }
+    },
+    followerCount: () => peers.size,
+    close: () => new Promise((resolve) => {
+      for (const peer of peers)
+        peer.destroy();
+      server.close(() => resolve());
+    })
+  };
+}
+function makeFollower(socket) {
+  socket.setEncoding("utf8");
+  const handlers = new Set;
+  const disconnectHandlers = new Set;
+  let buffer = "";
+  socket.on("data", (chunk) => {
+    buffer += chunk;
+    let nl;
+    while ((nl = buffer.indexOf(`
+`)) !== -1) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line)
+        continue;
+      const parsed = safeParse(line);
+      if (!parsed)
+        continue;
+      for (const h of handlers)
+        h(parsed);
+    }
+  });
+  socket.on("close", () => {
+    for (const h of disconnectHandlers)
+      h();
+  });
+  socket.on("error", (err) => {
+    for (const h of disconnectHandlers)
+      h(err);
+  });
+  return {
+    role: "follower",
+    onMessage(h) {
+      handlers.add(h);
+      return () => handlers.delete(h);
+    },
+    onDisconnect(h) {
+      disconnectHandlers.add(h);
+      return () => disconnectHandlers.delete(h);
+    },
+    close: () => new Promise((resolve) => {
+      if (socket.destroyed)
+        return resolve();
+      socket.once("close", () => resolve());
+      socket.destroy();
+    })
+  };
+}
+function safeParse(line) {
+  try {
+    const obj = JSON.parse(line);
+    if (obj && typeof obj === "object" && typeof obj.type === "string")
+      return obj;
+    return;
+  } catch {
+    return;
+  }
+}
+function tryListen(impl, p) {
+  return new Promise((resolve) => {
+    const server = impl();
+    server.once("error", (err) => resolve({ ok: false, code: err.code }));
+    server.listen(p, () => resolve({ ok: true, server }));
+  });
+}
+function tryConnect(impl, p) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let socket;
+    try {
+      socket = impl(p);
+    } catch {
+      resolve(undefined);
+      return;
+    }
+    socket.on("error", () => {
+      if (settled)
+        return;
+      settled = true;
+      try {
+        socket.destroy();
+      } catch {}
+      resolve(undefined);
+    });
+    socket.once("connect", () => {
+      if (settled)
+        return;
+      settled = true;
+      resolve(socket);
+    });
+  });
+}
+function defaultNetListen() {
+  return createServer();
+}
+function defaultNetConnect(p) {
+  return createConnection(p);
+}
+async function pathExists(p) {
+  if (process.platform === "win32")
+    return true;
+  try {
+    await access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function defaultUnlinkStale(p) {
+  if (process.platform === "win32")
+    return;
+  await unlink(p).catch(() => {});
+}
+
+// src/coordinator.ts
+async function runCoordinator(deps, onUpdate) {
+  const log = deps.log ?? (() => {});
+  const path2 = deps.ipcPath ?? ipcPathFor(deps.token);
+  while (!deps.signal.aborted) {
+    let role;
+    try {
+      role = await joinOrLead({ path: path2 });
+    } catch (err) {
+      log("error", "ipc bind/connect failed; falling back to standalone leader", String(err));
+      await runAsLeader(deps, onUpdate, undefined);
+      return;
+    }
+    if (role.role === "leader") {
+      log("info", "telegram-question: this process is the leader", { path: path2, followers: role.followerCount() });
+      await runAsLeader(deps, onUpdate, role);
+      return;
+    }
+    log("info", "telegram-question: this process is a follower", { path: path2 });
+    const reelect = await runAsFollower(deps, role, onUpdate);
+    if (!reelect)
+      return;
+  }
+}
+async function runAsLeader(deps, onUpdate, role) {
+  let offset = 0;
+  const log = deps.log ?? (() => {});
+  while (!deps.signal.aborted) {
+    try {
+      const updates = await deps.telegram.getUpdates(offset, 30, deps.signal);
+      for (const u of updates) {
+        offset = Math.max(offset, u.update_id + 1);
+        if (role && role.role === "leader")
+          role.broadcast({ type: "update", data: u });
+        await onUpdate(u).catch((err) => log("error", "leader update handler error", String(err)));
+      }
+    } catch (err) {
+      if (deps.signal.aborted)
+        break;
+      log("warn", "leader poll error, retrying in 5s", String(err));
+      await sleep(5000, deps.signal);
+    }
+  }
+  if (role && role.role === "leader")
+    await role.close().catch(() => {});
+}
+async function runAsFollower(deps, role, onUpdate) {
+  if (role.role !== "follower")
+    return false;
+  const log = deps.log ?? (() => {});
+  return await new Promise((resolve) => {
+    const offMsg = role.onMessage((m) => {
+      if (m.type !== "update")
+        return;
+      const u = m.data;
+      onUpdate(u).catch((err) => log("error", "follower update handler error", String(err)));
+    });
+    const offDisc = role.onDisconnect(() => {
+      offMsg();
+      offDisc();
+      if (deps.signal.aborted)
+        resolve(false);
+      else
+        resolve(true);
+    });
+    deps.signal.addEventListener("abort", () => {
+      offMsg();
+      offDisc();
+      role.close();
+      resolve(false);
+    }, { once: true });
+  });
+}
+function sleep(ms, signal) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => {
+      clearTimeout(t);
+      resolve();
+    }, { once: true });
+  });
 }
 
 // src/index.ts
@@ -435,23 +692,22 @@ var TelegramQuestionPlugin = async (input, options) => {
     }
   });
   const abort = new AbortController;
-  (async () => {
-    let offset = 0;
-    while (!abort.signal.aborted) {
-      try {
-        const updates = await telegram.getUpdates(offset, 30, abort.signal);
-        for (const u of updates) {
-          offset = Math.max(offset, u.update_id + 1);
-          await controller.handleUpdate(u).catch((err) => console.error("[telegram-question] handler error", err));
-        }
-      } catch (err) {
-        if (abort.signal.aborted)
-          return;
-        console.error("[telegram-question] poll error, retrying in 5s", err);
-        await new Promise((r) => setTimeout(r, 5000));
-      }
+  runCoordinator({
+    telegram,
+    token,
+    signal: abort.signal,
+    log: (level, msg, data) => {
+      const line = `[telegram-question] ${msg}` + (data ? " " + JSON.stringify(data) : "");
+      if (level === "error")
+        console.error(line);
+      else if (level === "warn")
+        console.warn(line);
+      else
+        console.log(line);
     }
-  })();
+  }, (u) => controller.handleUpdate(u).catch((err) => {
+    console.error("[telegram-question] handler error", err);
+  })).catch((err) => console.error("[telegram-question] coordinator stopped", err));
   process.once?.("beforeExit", () => abort.abort());
   return {
     event: async ({ event }) => {

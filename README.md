@@ -120,8 +120,25 @@ and the CLI/TUI flow is unchanged.
 ## Security notes
 
 - The plugin only accepts callback queries and messages from the configured
-  `chatId`. Other chats receive "Not authorized".
+  `chatId`. Updates from other chats are ignored.
 - The bot token grants full control of the bot; treat it like a password.
+
+## Multiple opencode sessions
+
+Telegram only allows a single concurrent long-poll per bot token, so the
+plugin coordinates across opencode processes on the same machine via a
+local IPC endpoint (Unix domain socket on Linux/macOS, named pipe on
+Windows). The first process to start becomes the leader and runs the
+poller; later sessions connect as followers and receive updates over the
+socket. If the leader exits, the followers race to take over and one of
+them becomes the new leader. Each process still issues its own outbound
+Telegram calls (sendMessage, editMessage, deleteMessage); only the
+inbound update stream is shared.
+
+A consequence is that free-text replies are only consumed when the user
+uses Telegram's Reply gesture against the plugin's force-reply prompt
+(which the Telegram client triggers automatically when the user taps the
+pre-filled reply). Stray messages typed into the chat are ignored.
 
 ## Development
 
