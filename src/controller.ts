@@ -171,15 +171,13 @@ export function makeController(deps: ControllerDeps) {
   async function handleCallback(update: Update): Promise<void> {
     const cb = update.callback_query
     if (!cb || !cb.message || !cb.data) return
-    if (cb.message.chat.id !== deps.chatID) {
-      await deps.telegram.answerCallback(cb.id, "Not authorized").catch(() => {})
-      return
-    }
+    if (cb.message.chat.id !== deps.chatID) return
     const target = messageIndex.get(cb.message.message_id)
-    if (!target) {
-      await deps.telegram.answerCallback(cb.id, "This question is no longer active").catch(() => {})
-      return
-    }
+    // Updates fan out to every opencode session sharing this bot token, so
+    // callbacks for messages we never sent are normal and must be ignored
+    // silently. Whichever peer owns the message (or none, if the question
+    // was already resolved) will answer (or not).
+    if (!target) return
     const state = requests.get(target.requestID)
     if (!state) {
       await deps.telegram.answerCallback(cb.id).catch(() => {})
@@ -253,26 +251,18 @@ export function makeController(deps: ControllerDeps) {
   async function handleMessage(update: Update): Promise<void> {
     const msg = update.message
     if (!msg || msg.chat.id !== deps.chatID || !msg.text) return
-    // Prefer routing by `reply_to_message_id` so concurrent custom prompts
-    // don't get crossed.
+    // Strict routing: free-text replies are only consumed when the user
+    // used Telegram's Reply gesture against one of our force_reply prompts
+    // (which Telegram's UI does automatically when the user taps the
+    // pre-filled reply). Anything else is either chitchat or belongs to
+    // another opencode session sharing this bot, so we ignore it.
     const replyTo = msg.reply_to_message?.message_id
-    if (replyTo !== undefined) {
-      for (const state of requests.values()) {
-        const idx = state.customPrompts.get(replyTo)
-        if (idx === undefined) continue
-        state.customPrompts.delete(replyTo)
-        await deps.telegram.deleteMessage(deps.chatID, replyTo).catch(() => {})
-        applyFreeText(state, idx, msg.text)
-        await trySubmit(state)
-        return
-      }
-    }
-    // Fallback: oldest open request with any awaiting custom prompt.
+    if (replyTo === undefined) return
     for (const state of requests.values()) {
-      if (state.customPrompts.size === 0) continue
-      const [promptMID, idx] = state.customPrompts.entries().next().value!
-      state.customPrompts.delete(promptMID)
-      await deps.telegram.deleteMessage(deps.chatID, promptMID).catch(() => {})
+      const idx = state.customPrompts.get(replyTo)
+      if (idx === undefined) continue
+      state.customPrompts.delete(replyTo)
+      await deps.telegram.deleteMessage(deps.chatID, replyTo).catch(() => {})
       applyFreeText(state, idx, msg.text)
       await trySubmit(state)
       return

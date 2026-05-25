@@ -312,7 +312,7 @@ describe("controller — cancel", () => {
 })
 
 describe("controller — wrong chat", () => {
-  test("callback from a different chat is rejected and does nothing", async () => {
+  test("callback from a different chat is ignored silently (other process's job)", async () => {
     const { telegram, controller, replies } = setup()
     await controller.onQuestionAsked(
       evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
@@ -328,7 +328,9 @@ describe("controller — wrong chat", () => {
       },
     })
     expect(replies).toEqual([])
-    expect(telegram.callbacksAnswered[0].text).toBe("Not authorized")
+    // Updates fan out to every opencode session sharing the bot, so we
+    // must not respond to callbacks we don't own.
+    expect(telegram.callbacksAnswered).toEqual([])
   })
 })
 
@@ -348,5 +350,68 @@ describe("controller — history transcript", () => {
     )
     expect(telegram.sent[0].text).toContain("Recent context:")
     expect(telegram.sent[1].text).not.toContain("Recent context:")
+  })
+})
+
+describe("controller — multi-session safety", () => {
+  // Simulates two opencode sessions sharing one bot token. Both controllers
+  // see every telegram update (because the IPC layer broadcasts to all
+  // followers), and each must only act on messages it itself sent.
+  test("each controller only acts on its own messages and ignores the other's updates", async () => {
+    const telegram = makeFakeTelegram()
+    const repliesA: { requestID: string; answers: ReadonlyArray<ReadonlyArray<string>> }[] = []
+    const repliesB: { requestID: string; answers: ReadonlyArray<ReadonlyArray<string>> }[] = []
+    const make = (id: string, sink: typeof repliesA) =>
+      makeController({
+        telegram,
+        chatID: CHAT,
+        historyMessages: 0,
+        fetchHistory: async () => [],
+        replyToOpencode: async (requestID, answers) => {
+          sink.push({ requestID, answers })
+        },
+        rejectInOpencode: async () => {},
+        log: () => void id,
+      })
+    const a = make("A", repliesA)
+    const b = make("B", repliesB)
+
+    await a.onQuestionAsked(evt([{ header: "ha", question: "qa", options: [{ label: "a1", description: "" }] }], "qA"))
+    const midA = telegram.sent[0].message_id
+    await b.onQuestionAsked(evt([{ header: "hb", question: "qb", options: [{ label: "b1", description: "" }] }], "qB"))
+    const midB = telegram.sent[1].message_id
+
+    // The user taps A's option. Both controllers receive the update; only
+    // A should reply to opencode.
+    const update = {
+      update_id: 1,
+      callback_query: { id: "c", from: { id: 1 }, message: { message_id: midA, chat: { id: CHAT } }, data: CB.option(0) },
+    }
+    await a.handleUpdate(update)
+    await b.handleUpdate(update)
+    expect(repliesA.map((r) => r.requestID)).toEqual(["qA"])
+    expect(repliesB).toEqual([])
+
+    // Symmetric: user taps B's option.
+    const update2 = {
+      update_id: 2,
+      callback_query: { id: "c2", from: { id: 1 }, message: { message_id: midB, chat: { id: CHAT } }, data: CB.option(0) },
+    }
+    await a.handleUpdate(update2)
+    await b.handleUpdate(update2)
+    expect(repliesB.map((r) => r.requestID)).toEqual(["qB"])
+    expect(repliesA.map((r) => r.requestID)).toEqual(["qA"])
+  })
+
+  test("free-text without reply_to_message is ignored (strict routing)", async () => {
+    const { controller, replies } = setup()
+    await controller.onQuestionAsked(
+      evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
+    )
+    await controller.handleUpdate({
+      update_id: 1,
+      message: { message_id: 99, chat: { id: CHAT }, text: "drive-by message" },
+    })
+    expect(replies).toEqual([])
   })
 })
