@@ -12,6 +12,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { makeTelegramClient, type TelegramClient } from "./telegram"
 import { makeController, type QuestionEvent } from "./controller"
+import { runCoordinator } from "./coordinator"
 
 type Options = {
   botToken?: string
@@ -101,24 +102,27 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
     },
   })
 
-  // Long-poll Telegram for updates. One fiber per plugin instance.
+  // Long-poll Telegram for updates. The coordinator transparently elects
+  // a leader per bot token across opencode sessions on the same machine,
+  // so only one process actually long-polls and the rest receive updates
+  // via IPC. Each process still sends its own outbound Telegram calls.
   const abort = new AbortController()
-  void (async () => {
-    let offset = 0
-    while (!abort.signal.aborted) {
-      try {
-        const updates = await telegram.getUpdates(offset, 30, abort.signal)
-        for (const u of updates) {
-          offset = Math.max(offset, u.update_id + 1)
-          await controller.handleUpdate(u).catch((err) => console.error("[telegram-question] handler error", err))
-        }
-      } catch (err) {
-        if (abort.signal.aborted) return
-        console.error("[telegram-question] poll error, retrying in 5s", err)
-        await new Promise((r) => setTimeout(r, 5000))
-      }
-    }
-  })()
+  void runCoordinator(
+    {
+      telegram,
+      token,
+      signal: abort.signal,
+      log: (level, msg, data) => {
+        const line = `[telegram-question] ${msg}` + (data ? " " + JSON.stringify(data) : "")
+        if (level === "error") console.error(line)
+        else if (level === "warn") console.warn(line)
+        else console.log(line)
+      },
+    },
+    (u) => controller.handleUpdate(u).catch((err) => {
+      console.error("[telegram-question] handler error", err)
+    }),
+  ).catch((err) => console.error("[telegram-question] coordinator stopped", err))
   // Best-effort shutdown if the host process exits cleanly.
   process.once?.("beforeExit", () => abort.abort())
 
