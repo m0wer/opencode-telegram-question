@@ -66,6 +66,14 @@ Multi-question calls are supported: every sub-question gets its own
 message, and the plugin only replies to opencode once all sub-questions
 have been answered (preserving order).
 
+Long free-text replies are coalesced. Telegram clients split messages
+longer than 4096 characters into multiple sends, each marked as a reply
+to the same prompt. The plugin buffers all such chunks, waits for a
+brief idle window (1.5s by default), then joins them in `message_id`
+order and submits a single combined answer. The window is configurable
+via the `freeTextDebounceMs` option on the controller; the default is a
+safe choice for typical reply latency.
+
 ## Setup
 
 ### 1. Create a Telegram bot
@@ -103,7 +111,7 @@ Add it to `~/.config/opencode/opencode.json`:
 ```
 
 opencode resolves the spec through npm, which fetches the repo straight from
-GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.2.0`.
+GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.2.1`.
 
 For local development, clone and reference the built file directly:
 
@@ -180,7 +188,9 @@ bun run build
 ```
 
 Tests cover: single-choice, multi-choice, free-text with `force_reply`,
-concurrent custom-prompt routing via `reply_to_message`, multi sub-question
+concurrent custom-prompt routing via `reply_to_message`, split-chunk
+coalescing for long free-text replies (in-order and out-of-order
+delivery), CLI-resolves-during-buffer cancellation, multi sub-question
 ordering, cancel/reject, CLI-answers-first cleanup, message edit-on-answer
 behavior, chat-id isolation, multi-session IPC leader election and
 broadcast, history part summarization (text/reasoning/tool titles), and

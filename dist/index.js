@@ -182,6 +182,14 @@ function makeController(deps) {
   const requests = new Map;
   const messageIndex = new Map;
   const log = deps.log ?? (() => {});
+  const freeTextDebounceMs = deps.freeTextDebounceMs ?? 1500;
+  function clearFreeTextTimers(state) {
+    for (const buf of state.freeTextBuffers.values()) {
+      if (buf.timer)
+        clearTimeout(buf.timer);
+    }
+    state.freeTextBuffers.clear();
+  }
   async function onQuestionAsked(event) {
     log("info", "question.asked", { id: event.id, count: event.questions.length });
     const transcript = await deps.fetchHistory(event.sessionID).catch((err) => {
@@ -194,6 +202,7 @@ function makeController(deps) {
       messageIDs: [],
       subStates: event.questions.map(() => ({ selected: new Set, awaitingCustom: false, answered: false })),
       customPrompts: new Map,
+      freeTextBuffers: new Map,
       closed: false,
       answeredFromTelegram: false
     };
@@ -216,6 +225,7 @@ function makeController(deps) {
       return;
     state.closed = true;
     requests.delete(requestID);
+    clearFreeTextTimers(state);
     if (state.answeredFromTelegram)
       return;
     for (const promptMID of state.customPrompts.keys()) {
@@ -245,6 +255,7 @@ function makeController(deps) {
       return;
     state.closed = true;
     state.answeredFromTelegram = true;
+    clearFreeTextTimers(state);
     const answers = state.subStates.map((sub, i) => sub.customAnswer !== undefined ? [sub.customAnswer] : selectionToAnswer(state.event.questions[i], sub.selected));
     try {
       await deps.replyToOpencode(state.event.id, answers);
@@ -303,6 +314,10 @@ function makeController(deps) {
       for (const [pmid, sIdx] of state.customPrompts) {
         if (sIdx === target.subIndex) {
           state.customPrompts.delete(pmid);
+          const buf = state.freeTextBuffers.get(pmid);
+          if (buf?.timer)
+            clearTimeout(buf.timer);
+          state.freeTextBuffers.delete(pmid);
           await deps.telegram.deleteMessage(deps.chatID, pmid).catch(() => {});
         }
       }
@@ -346,12 +361,34 @@ function makeController(deps) {
       const idx = state.customPrompts.get(replyTo);
       if (idx === undefined)
         continue;
-      state.customPrompts.delete(replyTo);
-      await deps.telegram.deleteMessage(deps.chatID, replyTo).catch(() => {});
-      applyFreeText(state, idx, msg.text);
-      await trySubmit(state);
+      let buf = state.freeTextBuffers.get(replyTo);
+      if (!buf) {
+        buf = { subIndex: idx, parts: [], timer: null };
+        state.freeTextBuffers.set(replyTo, buf);
+      }
+      buf.parts.push({ mid: msg.message_id, text: msg.text });
+      if (buf.timer)
+        clearTimeout(buf.timer);
+      buf.timer = setTimeout(() => {
+        flushFreeText(state, replyTo).catch((err) => log("error", "flushFreeText error", String(err)));
+      }, freeTextDebounceMs);
       return;
     }
+  }
+  async function flushFreeText(state, promptMID) {
+    if (state.closed)
+      return;
+    const buf = state.freeTextBuffers.get(promptMID);
+    if (!buf)
+      return;
+    state.freeTextBuffers.delete(promptMID);
+    buf.timer = null;
+    const text = buf.parts.slice().sort((a, b) => a.mid - b.mid).map((p) => p.text).join(`
+`);
+    state.customPrompts.delete(promptMID);
+    await deps.telegram.deleteMessage(deps.chatID, promptMID).catch(() => {});
+    applyFreeText(state, buf.subIndex, text);
+    await trySubmit(state);
   }
   function applyFreeText(state, idx, text) {
     const sub = state.subStates[idx];
