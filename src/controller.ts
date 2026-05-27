@@ -24,6 +24,12 @@ export type ControllerDeps = {
   replyToOpencode(requestID: string, answers: ReadonlyArray<ReadonlyArray<string>>): Promise<void>
   rejectInOpencode(requestID: string): Promise<void>
   log?(level: "info" | "warn" | "error", msg: string, data?: unknown): void
+  // How long to wait, after the most recent free-text chunk replying to
+  // a force_reply prompt, before treating the buffered chunks as one
+  // complete answer. Telegram clients split messages longer than 4096
+  // chars into multiple sends, each carrying the same reply_to_message,
+  // so we must coalesce them. Defaults to 1500ms.
+  freeTextDebounceMs?: number
 }
 
 type SubState = {
@@ -43,6 +49,12 @@ type RequestState = {
   // prompts coexist: each inbound text message includes
   // `reply_to_message.message_id` pointing to its prompt.
   customPrompts: Map<number, number>
+  // Buffer of in-flight free-text chunks per force_reply prompt. Telegram
+  // splits replies longer than 4096 chars into multiple messages, each
+  // marked `reply_to_message_id = <prompt mid>`. We accumulate them and
+  // flush after `freeTextDebounceMs` of silence, joining by message_id
+  // order so chunks land in the order the user typed them.
+  freeTextBuffers: Map<number, { subIndex: number; parts: { mid: number; text: string }[]; timer: ReturnType<typeof setTimeout> | null }>
   closed: boolean
   // Set to true after we successfully relay the answer to opencode. The
   // subsequent `question.replied` event then must NOT delete the telegram
@@ -57,6 +69,17 @@ export function makeController(deps: ControllerDeps) {
   const messageIndex = new Map<number, { requestID: string; subIndex: number }>()
 
   const log = deps.log ?? (() => {})
+  const freeTextDebounceMs = deps.freeTextDebounceMs ?? 1500
+
+  // Clear any pending free-text debounce timers for a request. Used when the
+  // request resolves (either side) so a late timer can't fire against a
+  // closed RequestState.
+  function clearFreeTextTimers(state: RequestState): void {
+    for (const buf of state.freeTextBuffers.values()) {
+      if (buf.timer) clearTimeout(buf.timer)
+    }
+    state.freeTextBuffers.clear()
+  }
 
   async function onQuestionAsked(event: QuestionEvent): Promise<void> {
     log("info", "question.asked", { id: event.id, count: event.questions.length })
@@ -71,6 +94,7 @@ export function makeController(deps: ControllerDeps) {
       messageIDs: [],
       subStates: event.questions.map(() => ({ selected: new Set<number>(), awaitingCustom: false, answered: false })),
       customPrompts: new Map(),
+      freeTextBuffers: new Map(),
       closed: false,
       answeredFromTelegram: false,
     }
@@ -99,6 +123,7 @@ export function makeController(deps: ControllerDeps) {
     if (!state || state.closed) return
     state.closed = true
     requests.delete(requestID)
+    clearFreeTextTimers(state)
     if (state.answeredFromTelegram) return
     for (const promptMID of state.customPrompts.keys()) {
       await deps.telegram.deleteMessage(deps.chatID, promptMID).catch(() => {})
@@ -127,6 +152,7 @@ export function makeController(deps: ControllerDeps) {
     if (!state.subStates.every((s) => s.answered)) return
     state.closed = true
     state.answeredFromTelegram = true
+    clearFreeTextTimers(state)
     const answers = state.subStates.map((sub, i) =>
       sub.customAnswer !== undefined
         ? [sub.customAnswer]
@@ -206,6 +232,9 @@ export function makeController(deps: ControllerDeps) {
       for (const [pmid, sIdx] of state.customPrompts) {
         if (sIdx === target.subIndex) {
           state.customPrompts.delete(pmid)
+          const buf = state.freeTextBuffers.get(pmid)
+          if (buf?.timer) clearTimeout(buf.timer)
+          state.freeTextBuffers.delete(pmid)
           await deps.telegram.deleteMessage(deps.chatID, pmid).catch(() => {})
         }
       }
@@ -261,12 +290,44 @@ export function makeController(deps: ControllerDeps) {
     for (const state of requests.values()) {
       const idx = state.customPrompts.get(replyTo)
       if (idx === undefined) continue
-      state.customPrompts.delete(replyTo)
-      await deps.telegram.deleteMessage(deps.chatID, replyTo).catch(() => {})
-      applyFreeText(state, idx, msg.text)
-      await trySubmit(state)
+      // Buffer this chunk. Telegram clients split messages longer than
+      // 4096 chars into multiple sends, each carrying the same
+      // reply_to_message_id, so naively submitting on the first chunk
+      // would drop the rest. We instead append and debounce.
+      let buf = state.freeTextBuffers.get(replyTo)
+      if (!buf) {
+        buf = { subIndex: idx, parts: [], timer: null }
+        state.freeTextBuffers.set(replyTo, buf)
+      }
+      buf.parts.push({ mid: msg.message_id, text: msg.text })
+      if (buf.timer) clearTimeout(buf.timer)
+      buf.timer = setTimeout(() => {
+        // Fire-and-forget: the timer callback can't be awaited. Any errors
+        // inside the flush already log via the controller's logger.
+        void flushFreeText(state, replyTo).catch((err) => log("error", "flushFreeText error", String(err)))
+      }, freeTextDebounceMs)
       return
     }
+  }
+
+  async function flushFreeText(state: RequestState, promptMID: number): Promise<void> {
+    if (state.closed) return
+    const buf = state.freeTextBuffers.get(promptMID)
+    if (!buf) return
+    state.freeTextBuffers.delete(promptMID)
+    buf.timer = null
+    // Join chunks by message_id so the original typing order is preserved
+    // even if updates arrived slightly out of order. Telegram emits chunks
+    // a few ms apart with strictly increasing message_id.
+    const text = buf.parts
+      .slice()
+      .sort((a, b) => a.mid - b.mid)
+      .map((p) => p.text)
+      .join("\n")
+    state.customPrompts.delete(promptMID)
+    await deps.telegram.deleteMessage(deps.chatID, promptMID).catch(() => {})
+    applyFreeText(state, buf.subIndex, text)
+    await trySubmit(state)
   }
 
   function applyFreeText(state: RequestState, idx: number, text: string): void {

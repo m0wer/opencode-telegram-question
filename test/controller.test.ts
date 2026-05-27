@@ -5,7 +5,7 @@ import { makeFakeTelegram } from "./fake-telegram"
 
 const CHAT = 42
 
-function setup(opts?: { history?: { role: string; text: string }[] }) {
+function setup(opts?: { history?: { role: string; text: string }[]; freeTextDebounceMs?: number }) {
   const telegram = makeFakeTelegram()
   const replies: { requestID: string; answers: ReadonlyArray<ReadonlyArray<string>> }[] = []
   const rejects: string[] = []
@@ -20,8 +20,16 @@ function setup(opts?: { history?: { role: string; text: string }[] }) {
     rejectInOpencode: async (requestID) => {
       rejects.push(requestID)
     },
+    freeTextDebounceMs: opts?.freeTextDebounceMs ?? 0,
   })
   return { telegram, controller, replies, rejects }
+}
+
+// Drain the debounced free-text timer. The controller schedules a
+// setTimeout to coalesce split chunks; with debounce=0 in tests it still
+// fires on the next macrotask, so we wait a few ms.
+function flushFreeText(): Promise<void> {
+  return new Promise((r) => setTimeout(r, 5))
 }
 
 function evt(questions: QuestionEvent["questions"], id = "q1"): QuestionEvent {
@@ -122,6 +130,7 @@ describe("controller — free-text answer", () => {
         reply_to_message: { message_id: prompt.message_id },
       },
     })
+    await flushFreeText()
     expect(replies).toEqual([{ requestID: "q1", answers: [["made up answer"]] }])
     expect(prompt.deleted).toBe(true)
   })
@@ -154,11 +163,13 @@ describe("controller — free-text answer", () => {
       update_id: 3,
       message: { message_id: 10, chat: { id: CHAT }, text: "answer two", reply_to_message: { message_id: prompt2.message_id } },
     })
+    await flushFreeText()
     expect(replies).toEqual([])
     await controller.handleUpdate({
       update_id: 4,
       message: { message_id: 11, chat: { id: CHAT }, text: "answer one", reply_to_message: { message_id: prompt1.message_id } },
     })
+    await flushFreeText()
     expect(replies).toEqual([{ requestID: "q1", answers: [["answer one"], ["answer two"]] }])
     expect(prompt1.deleted).toBe(true)
     expect(prompt2.deleted).toBe(true)
@@ -181,6 +192,99 @@ describe("controller — free-text answer", () => {
     expect(firstPrompt.deleted).toBe(true)
     expect(telegram.sent.length).toBe(3)
     expect(telegram.sent[2].deleted).toBe(false)
+  })
+
+  test("coalesces split chunks of a long reply into a single answer", async () => {
+    // Telegram clients split messages longer than 4096 chars into multiple
+    // sends, each marked reply_to_message_id = <prompt mid>. Before the
+    // debounce we submitted on the first chunk and dropped the rest.
+    const { telegram, controller, replies } = setup({ freeTextDebounceMs: 20 })
+    await controller.onQuestionAsked(
+      evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
+    )
+    const qmid = telegram.sent[0].message_id
+    await controller.handleUpdate({
+      update_id: 1,
+      callback_query: { id: "c", from: { id: 1 }, message: { message_id: qmid, chat: { id: CHAT } }, data: CB.custom },
+    })
+    const prompt = telegram.sent[1]
+    // Three chunks arrive in quick succession, all replying to the same prompt.
+    await controller.handleUpdate({
+      update_id: 2,
+      message: { message_id: 100, chat: { id: CHAT }, text: "chunk one", reply_to_message: { message_id: prompt.message_id } },
+    })
+    await new Promise((r) => setTimeout(r, 5))
+    expect(replies).toEqual([])
+    await controller.handleUpdate({
+      update_id: 3,
+      message: { message_id: 101, chat: { id: CHAT }, text: "chunk two", reply_to_message: { message_id: prompt.message_id } },
+    })
+    await new Promise((r) => setTimeout(r, 5))
+    expect(replies).toEqual([])
+    await controller.handleUpdate({
+      update_id: 4,
+      message: { message_id: 102, chat: { id: CHAT }, text: "chunk three", reply_to_message: { message_id: prompt.message_id } },
+    })
+    // Wait past the debounce window for the flush to fire.
+    await new Promise((r) => setTimeout(r, 40))
+    expect(replies).toEqual([{ requestID: "q1", answers: [["chunk one\nchunk two\nchunk three"]] }])
+    expect(prompt.deleted).toBe(true)
+  })
+
+  test("joins chunks by message_id when they arrive slightly out of order", async () => {
+    const { telegram, controller, replies } = setup({ freeTextDebounceMs: 20 })
+    await controller.onQuestionAsked(
+      evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
+    )
+    const qmid = telegram.sent[0].message_id
+    await controller.handleUpdate({
+      update_id: 1,
+      callback_query: { id: "c", from: { id: 1 }, message: { message_id: qmid, chat: { id: CHAT } }, data: CB.custom },
+    })
+    const prompt = telegram.sent[1]
+    // Deliver out of order: 102 then 100 then 101. Result must still be
+    // ordered by message_id so the user's original typing order is preserved.
+    await controller.handleUpdate({
+      update_id: 2,
+      message: { message_id: 102, chat: { id: CHAT }, text: "third", reply_to_message: { message_id: prompt.message_id } },
+    })
+    await controller.handleUpdate({
+      update_id: 3,
+      message: { message_id: 100, chat: { id: CHAT }, text: "first", reply_to_message: { message_id: prompt.message_id } },
+    })
+    await controller.handleUpdate({
+      update_id: 4,
+      message: { message_id: 101, chat: { id: CHAT }, text: "second", reply_to_message: { message_id: prompt.message_id } },
+    })
+    await new Promise((r) => setTimeout(r, 40))
+    expect(replies).toEqual([{ requestID: "q1", answers: [["first\nsecond\nthird"]] }])
+  })
+
+  test("CLI-side resolution while free-text chunks are buffered cancels the flush", async () => {
+    // If opencode resolves the question (CLI/TUI answered) before the
+    // debounce timer fires, the buffered chunks must NOT be submitted: the
+    // request is already closed. We also expect no late replyToOpencode call.
+    const { telegram, controller, replies } = setup({ freeTextDebounceMs: 20 })
+    await controller.onQuestionAsked(
+      evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
+    )
+    const qmid = telegram.sent[0].message_id
+    await controller.handleUpdate({
+      update_id: 1,
+      callback_query: { id: "c", from: { id: 1 }, message: { message_id: qmid, chat: { id: CHAT } }, data: CB.custom },
+    })
+    const prompt = telegram.sent[1]
+    await controller.handleUpdate({
+      update_id: 2,
+      message: { message_id: 200, chat: { id: CHAT }, text: "partial reply", reply_to_message: { message_id: prompt.message_id } },
+    })
+    // CLI resolves the question before the debounce window elapses.
+    await controller.onQuestionResolved("q1")
+    await new Promise((r) => setTimeout(r, 40))
+    expect(replies).toEqual([])
+    // The prompt and the question message must both be cleaned up.
+    expect(prompt.deleted).toBe(true)
+    expect(telegram.sent[0].deleted).toBe(true)
   })
 })
 
