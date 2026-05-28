@@ -115,7 +115,7 @@ Add it to `~/.config/opencode/opencode.json`:
 ```
 
 opencode resolves the spec through npm, which fetches the repo straight from
-GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.2.2`.
+GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.2.3`.
 
 For local development, clone and reference the built file directly:
 

@@ -98,7 +98,7 @@ function renderQuestion(prompt, context) {
   }
   const keyboard = prompt.options.map((opt, i) => [
     {
-      text: `${context.selected.has(i) ? "✅ " : ""}${opt.label}`,
+      text: `${context.selected.has(i) ? "✅ " : ""}${i + 1}. ${opt.label}`,
       callback_data: CB.option(i)
     }
   ]);

@@ -1,6 +1,6 @@
 {
   "name": "opencode-telegram-question",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Mirror opencode's question tool to a Telegram bot so you can answer from anywhere",
   "type": "module",
   "main": "./dist/index.js",
