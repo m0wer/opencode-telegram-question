@@ -8,6 +8,7 @@
 //   TELEGRAM_BOT_TOKEN
 //   TELEGRAM_CHAT_ID
 //   OPENCODE_TELEGRAM_HISTORY  (optional, default 3)
+//   OPENCODE_TELEGRAM_QUICK_REPLIES  (optional, JSON array of strings)
 //
 // All log output is appended to a file under the user's state directory
 // (XDG_STATE_HOME on POSIX, LOCALAPPDATA on Windows) so the opencode TUI
@@ -25,6 +26,11 @@ type Options = {
   botToken?: string
   chatId?: number | string
   historyMessages?: number
+  // Extra one-tap buttons appended after the option buttons and the
+  // "Type your own answer" row. Tapping one submits its text as the
+  // free-text answer for that sub-question. Useful for stock replies
+  // like "decide yourself" or "skip this one".
+  quickReplies?: ReadonlyArray<string>
   // Allow tests / advanced users to swap the transport.
   telegram?: TelegramClient
   // Override the log file path. Default: see defaultLogFile().
@@ -39,6 +45,7 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
   // Route every log line to a file so the TUI stays clean. Tail with e.g.
   // `tail -f ~/.local/state/opencode-telegram-question/plugin.log`.
   const log = makeFileLogger(opts.logFile ?? defaultLogFile())
+  const quickReplies = opts.quickReplies ?? parseQuickRepliesEnv(process.env.OPENCODE_TELEGRAM_QUICK_REPLIES, log)
 
   if (!token || chatIdRaw === undefined || chatIdRaw === "") {
     log("warn", "disabled: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID (set in opencode.json plugin options or env)")
@@ -55,6 +62,7 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
     telegram,
     chatID,
     historyMessages,
+    quickReplies,
     fetchHistory: async (sessionID) => {
       // Best-effort: tolerate SDK shape drift across opencode versions. The
       // method is `client.session.messages(...)` (not `.messages.list`).
@@ -193,6 +201,30 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
       }
     },
   }
+}
+
+// Parse the OPENCODE_TELEGRAM_QUICK_REPLIES env var. Accepts either a JSON
+// array of strings (preferred, allows commas inside replies) or a simple
+// comma-separated list as a fallback. Empty / missing => no quick replies.
+function parseQuickRepliesEnv(
+  raw: string | undefined,
+  log: (level: "info" | "warn" | "error", msg: string, data?: unknown) => void,
+): ReadonlyArray<string> {
+  if (!raw) return []
+  const trimmed = raw.trim()
+  if (!trimmed) return []
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed) && parsed.every((s) => typeof s === "string")) return parsed
+      log("warn", "OPENCODE_TELEGRAM_QUICK_REPLIES JSON is not an array of strings", { value: trimmed })
+      return []
+    } catch (err) {
+      log("warn", "OPENCODE_TELEGRAM_QUICK_REPLIES JSON parse failed", String(err))
+      return []
+    }
+  }
+  return trimmed.split(",").map((s) => s.trim()).filter(Boolean)
 }
 
 // V1 plugin shape: a default export object `{ server, id }`. Do NOT add

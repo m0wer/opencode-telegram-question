@@ -24,6 +24,10 @@ export type ControllerDeps = {
   replyToOpencode(requestID: string, answers: ReadonlyArray<ReadonlyArray<string>>): Promise<void>
   rejectInOpencode(requestID: string): Promise<void>
   log?(level: "info" | "warn" | "error", msg: string, data?: unknown): void
+  // Stock free-text answers shown as extra buttons after the options and
+  // the "Type your own answer" row. Tapping one submits its text as the
+  // sub-question's answer without typing anything. Defaults to [].
+  quickReplies?: ReadonlyArray<string>
   // How long to wait, after the most recent free-text chunk replying to
   // a force_reply prompt, before treating the buffered chunks as one
   // complete answer. Telegram clients split messages longer than 4096
@@ -70,6 +74,7 @@ export function makeController(deps: ControllerDeps) {
 
   const log = deps.log ?? (() => {})
   const freeTextDebounceMs = deps.freeTextDebounceMs ?? 1500
+  const quickReplies = deps.quickReplies ?? []
 
   // Clear any pending free-text debounce timers for a request. Used when the
   // request resolves (either side) so a late timer can't fire against a
@@ -106,6 +111,7 @@ export function makeController(deps: ControllerDeps) {
         total: event.questions.length,
         selected: state.subStates[i].selected,
         transcript: i === 0 ? transcriptText : undefined,
+        quickReplies,
       })
       const sent = await deps.telegram.sendMessage(deps.chatID, clip(text, TELEGRAM_MAX), keyboard)
       state.messageIDs.push(sent.message_id)
@@ -142,6 +148,7 @@ export function makeController(deps: ControllerDeps) {
       index: subIndex,
       total: state.event.questions.length,
       selected: sub.selected,
+      quickReplies,
     })
     const mid = state.messageIDs[subIndex]
     await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX), keyboard)
@@ -258,6 +265,27 @@ export function makeController(deps: ControllerDeps) {
         sub.answered = true
         await trySubmit(state)
       }
+      return
+    }
+
+    if (cb.data.startsWith("q:")) {
+      // Quick reply: a stock free-text answer the user pre-configured.
+      // We treat it exactly like a typed custom answer (single string,
+      // wrapped in a 1-element answer array), and tidy up any open
+      // force_reply prompt for this sub-question.
+      const idx = Number(cb.data.slice(2))
+      if (!Number.isInteger(idx) || idx < 0 || idx >= quickReplies.length) return
+      for (const [pmid, sIdx] of state.customPrompts) {
+        if (sIdx === target.subIndex) {
+          state.customPrompts.delete(pmid)
+          const buf = state.freeTextBuffers.get(pmid)
+          if (buf?.timer) clearTimeout(buf.timer)
+          state.freeTextBuffers.delete(pmid)
+          await deps.telegram.deleteMessage(deps.chatID, pmid).catch(() => {})
+        }
+      }
+      applyFreeText(state, target.subIndex, quickReplies[idx])
+      await trySubmit(state)
       return
     }
 

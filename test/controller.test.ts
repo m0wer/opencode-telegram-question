@@ -5,7 +5,7 @@ import { makeFakeTelegram } from "./fake-telegram"
 
 const CHAT = 42
 
-function setup(opts?: { history?: { role: string; text: string }[]; freeTextDebounceMs?: number }) {
+function setup(opts?: { history?: { role: string; text: string }[]; freeTextDebounceMs?: number; quickReplies?: ReadonlyArray<string> }) {
   const telegram = makeFakeTelegram()
   const replies: { requestID: string; answers: ReadonlyArray<ReadonlyArray<string>> }[] = []
   const rejects: string[] = []
@@ -21,6 +21,7 @@ function setup(opts?: { history?: { role: string; text: string }[]; freeTextDebo
       rejects.push(requestID)
     },
     freeTextDebounceMs: opts?.freeTextDebounceMs ?? 0,
+    quickReplies: opts?.quickReplies,
   })
   return { telegram, controller, replies, rejects }
 }
@@ -412,6 +413,55 @@ describe("controller — cancel", () => {
     })
     expect(rejects).toEqual(["q1"])
     expect(telegram.sent.find((m) => m.message_id === promptMID)?.deleted).toBe(true)
+  })
+})
+
+describe("controller — quick replies", () => {
+  test("tapping a quick-reply button submits its text as the free-text answer", async () => {
+    const { telegram, controller, replies } = setup({ quickReplies: ["decide yourself", "skip"] })
+    await controller.onQuestionAsked(
+      evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
+    )
+    const mid = telegram.sent[0].message_id
+    await controller.handleUpdate({
+      update_id: 1,
+      callback_query: { id: "c", from: { id: 1 }, message: { message_id: mid, chat: { id: CHAT } }, data: CB.quick(0) },
+    })
+    expect(replies).toEqual([{ requestID: "q1", answers: [["decide yourself"]] }])
+  })
+
+  test("quick reply with an open force_reply prompt deletes the prompt before submitting", async () => {
+    const { telegram, controller, replies } = setup({ quickReplies: ["decide yourself"] })
+    await controller.onQuestionAsked(
+      evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
+    )
+    const mid = telegram.sent[0].message_id
+    // Open custom prompt first.
+    await controller.handleUpdate({
+      update_id: 1,
+      callback_query: { id: "c", from: { id: 1 }, message: { message_id: mid, chat: { id: CHAT } }, data: CB.custom },
+    })
+    const prompt = telegram.sent[1]
+    // Then change mind and tap quick reply.
+    await controller.handleUpdate({
+      update_id: 2,
+      callback_query: { id: "d", from: { id: 1 }, message: { message_id: mid, chat: { id: CHAT } }, data: CB.quick(0) },
+    })
+    expect(replies).toEqual([{ requestID: "q1", answers: [["decide yourself"]] }])
+    expect(prompt.deleted).toBe(true)
+  })
+
+  test("out-of-range quick reply index is ignored", async () => {
+    const { telegram, controller, replies } = setup({ quickReplies: ["only one"] })
+    await controller.onQuestionAsked(
+      evt([{ header: "h", question: "q", options: [{ label: "a", description: "" }] }]),
+    )
+    const mid = telegram.sent[0].message_id
+    await controller.handleUpdate({
+      update_id: 1,
+      callback_query: { id: "c", from: { id: 1 }, message: { message_id: mid, chat: { id: CHAT } }, data: CB.quick(5) },
+    })
+    expect(replies).toEqual([])
   })
 })
 

@@ -84,6 +84,27 @@ describe("renderQuestion", () => {
     expect(r.keyboard[1][0].text).toBe("\u2705 2. beta")
   })
 
+  test("appends one button per quickReply with q:<idx> callback", () => {
+    const r = renderQuestion(
+      { header: "h", question: "q", options: [{ label: "a", description: "" }] },
+      { index: 0, total: 1, selected: new Set(), quickReplies: ["decide yourself", "skip"] },
+    )
+    const labels = r.keyboard.flat().map((b) => b.text)
+    expect(labels).toContain("decide yourself")
+    expect(labels).toContain("skip")
+    const datas = r.keyboard.flat().map((b) => b.callback_data)
+    expect(datas).toContain(CB.quick(0))
+    expect(datas).toContain(CB.quick(1))
+  })
+
+  test("no quickReplies => no q: buttons", () => {
+    const r = renderQuestion(
+      { header: "h", question: "q", options: [{ label: "a", description: "" }] },
+      { index: 0, total: 1, selected: new Set() },
+    )
+    expect(r.keyboard.flat().some((b) => b.callback_data.startsWith("q:"))).toBe(false)
+  })
+
   test("prepends recent context transcript when provided", () => {
     const r = renderQuestion(
       { header: "h", question: "q", options: [] },

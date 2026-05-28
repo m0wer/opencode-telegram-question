@@ -23,17 +23,24 @@ export type InlineKeyboard = InlineButton[][]
 
 // Telegram limits callback_data to 64 bytes. We encode actions as compact
 // strings: `o:<idx>` (option toggle), `c` (custom-text mode), `d` (done for
-// multi-select), `x` (cancel).
+// multi-select), `x` (cancel), `q:<idx>` (quick reply, stock free-text).
 export const CB = {
   option: (idx: number) => `o:${idx}`,
   custom: "c",
   done: "d",
   cancel: "x",
+  quick: (idx: number) => `q:${idx}`,
 } as const
 
 export function renderQuestion(
   prompt: Prompt,
-  context: { index: number; total: number; selected: ReadonlySet<number>; transcript?: string },
+  context: {
+    index: number
+    total: number
+    selected: ReadonlySet<number>
+    transcript?: string
+    quickReplies?: ReadonlyArray<string>
+  },
 ): { text: string; keyboard: InlineKeyboard } {
   const lines: string[] = []
   if (context.total > 1) lines.push(`Question ${context.index + 1}/${context.total}: ${prompt.header}`)
@@ -65,6 +72,14 @@ export function renderQuestion(
   const allowCustom = prompt.custom !== false
   if (allowCustom) keyboard.push([{ text: "Type your own answer", callback_data: CB.custom }])
   if (prompt.multiple) keyboard.push([{ text: "Done", callback_data: CB.done }])
+  // Stock free-text replies the user configured globally. Each becomes
+  // one button that, when tapped, submits its text as the answer (no
+  // typing needed). Useful for "decide yourself", "skip", etc.
+  if (context.quickReplies) {
+    for (let i = 0; i < context.quickReplies.length; i++) {
+      keyboard.push([{ text: context.quickReplies[i], callback_data: CB.quick(i) }])
+    }
+  }
   // No Cancel button: rejecting a question is destructive (it propagates
   // as a tool error to the agent), and a misclick on a phone keyboard
   // shouldn't be able to kill the request. If you want to cancel, do it
