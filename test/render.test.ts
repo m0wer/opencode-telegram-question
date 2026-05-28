@@ -66,6 +66,24 @@ describe("renderQuestion", () => {
     expect(r.keyboard[1][0].text.startsWith("\u2705 ")).toBe(true)
   })
 
+  test("button text includes the same 1-based number shown in the message body", () => {
+    const r = renderQuestion(
+      {
+        header: "h",
+        question: "q",
+        options: [
+          { label: "alpha", description: "" },
+          { label: "beta", description: "" },
+        ],
+      },
+      { index: 0, total: 1, selected: new Set([1]) },
+    )
+    // Unselected option: no checkmark, but the number prefix matches the body.
+    expect(r.keyboard[0][0].text).toBe("1. alpha")
+    // Selected option: checkmark then number prefix.
+    expect(r.keyboard[1][0].text).toBe("\u2705 2. beta")
+  })
+
   test("prepends recent context transcript when provided", () => {
     const r = renderQuestion(
       { header: "h", question: "q", options: [] },

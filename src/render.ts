@@ -54,7 +54,11 @@ export function renderQuestion(
   }
   const keyboard: InlineKeyboard = prompt.options.map((opt, i) => [
     {
-      text: `${context.selected.has(i) ? "\u2705 " : ""}${opt.label}`,
+      // Prefix buttons with the same 1-based number used in the message
+      // body so users can match a button to its line at a glance,
+      // especially when option labels are long and Telegram truncates
+      // them in the keyboard.
+      text: `${context.selected.has(i) ? "\u2705 " : ""}${i + 1}. ${opt.label}`,
       callback_data: CB.option(i),
     },
   ])
