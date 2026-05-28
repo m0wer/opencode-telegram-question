@@ -61,7 +61,11 @@ export function renderQuestion(
   const allowCustom = prompt.custom !== false
   if (allowCustom) keyboard.push([{ text: "Type your own answer", callback_data: CB.custom }])
   if (prompt.multiple) keyboard.push([{ text: "Done", callback_data: CB.done }])
-  keyboard.push([{ text: "Cancel", callback_data: CB.cancel }])
+  // No Cancel button: rejecting a question is destructive (it propagates
+  // as a tool error to the agent), and a misclick on a phone keyboard
+  // shouldn't be able to kill the request. If you want to cancel, do it
+  // from the CLI/TUI; the Telegram message will be cleaned up via the
+  // question.rejected event.
   return { text: lines.join("\n"), keyboard }
 }
 

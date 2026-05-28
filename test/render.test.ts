@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { renderQuestion, renderAnsweredQuestion, selectionToAnswer, renderTranscript, clip, summarizePart, CB } from "../src/render"
 
 describe("renderQuestion", () => {
-  test("renders header, question, options, and one keyboard button per option plus custom and cancel", () => {
+  test("renders header, question, options, and one keyboard button per option plus the custom row", () => {
     const r = renderQuestion(
       {
         header: "Pick color",
@@ -18,11 +18,12 @@ describe("renderQuestion", () => {
     expect(r.text).toContain("Which color?")
     expect(r.text).toContain("\u26AA 1. red")
     expect(r.text).toContain("\u26AA 2. blue")
-    // 2 option rows + custom + cancel
-    expect(r.keyboard).toHaveLength(4)
+    // 2 option rows + custom. No cancel button: rejecting a question is
+    // destructive and a misclick shouldn't kill the request.
+    expect(r.keyboard).toHaveLength(3)
     expect(r.keyboard[0][0].callback_data).toBe(CB.option(0))
     expect(r.keyboard[2][0].callback_data).toBe(CB.custom)
-    expect(r.keyboard[3][0].callback_data).toBe(CB.cancel)
+    expect(r.keyboard.flat().some((b) => b.callback_data === CB.cancel)).toBe(false)
   })
 
   test("omits custom row when custom is false", () => {
@@ -30,8 +31,8 @@ describe("renderQuestion", () => {
       { header: "h", question: "q", options: [{ label: "a", description: "" }], custom: false },
       { index: 0, total: 1, selected: new Set() },
     )
-    // only 1 option + cancel
     expect(r.keyboard.flat().some((b) => b.callback_data === CB.custom)).toBe(false)
+    expect(r.keyboard.flat().some((b) => b.callback_data === CB.cancel)).toBe(false)
   })
 
   test("adds done button only for multiple", () => {
