@@ -67,7 +67,8 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
       // Best-effort: tolerate SDK shape drift across opencode versions. The
       // method is `client.session.messages(...)` (not `.messages.list`).
       // v1 SDK takes `{ path: { id } }`; the v2 SDK takes `{ sessionID }`.
-      // The response is a bare `Array<{ info, parts }>`, no `data` wrapper.
+      // Either way, the unwrapped payload is an `Array<{ info, parts }>`;
+      // the typed SDK wraps it in `{ data, error, request, response }`.
       const anyClient = input.client as any
       const sessionAPI = anyClient?.session
       const messages = sessionAPI?.messages
@@ -75,17 +76,36 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
         log("warn", "session.messages SDK method not found", { keys: sessionAPI ? Object.keys(sessionAPI) : null })
         return []
       }
-      const tryShapes: any[] = [{ sessionID }, { path: { id: sessionID } }]
+      const tryShapes: any[] = [{ path: { id: sessionID } }, { sessionID }, { id: sessionID }]
       let res: any
+      let lastErr: unknown
       for (const args of tryShapes) {
-        res = await messages.call(sessionAPI, args).catch(() => undefined)
+        try {
+          res = await messages.call(sessionAPI, args)
+        } catch (err) {
+          lastErr = err
+          res = undefined
+          continue
+        }
+        // SDK error shape: { data: undefined, error: {...} }. Treat that
+        // as a miss so we fall through to the next argument shape rather
+        // than silently returning an empty transcript.
+        if (res && typeof res === "object" && "error" in res && res.error !== undefined && res.data === undefined) {
+          lastErr = res.error
+          res = undefined
+          continue
+        }
         if (res !== undefined) break
       }
       if (res === undefined) {
-        log("warn", "session.messages returned no data for either SDK shape")
+        log("warn", "session.messages returned no data for any SDK shape", { err: String(lastErr ?? "") })
         return []
       }
       const data: any[] = Array.isArray(res) ? res : res?.data ?? res?.items ?? []
+      if (!Array.isArray(data) || data.length === 0) {
+        log("info", "session.messages returned empty payload", { shape: Array.isArray(res) ? "bare-array" : Object.keys(res ?? {}) })
+        return []
+      }
       const out: { role: string; text: string }[] = []
       for (const m of data) {
         const info = m.info ?? m
@@ -93,20 +113,28 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
         const text = parts.map((p) => summarizePart(p)).filter(Boolean).join(" ")
         if (text) out.push({ role: info?.role ?? "?", text })
       }
+      log("info", "session.messages transcript built", { rawMessages: data.length, kept: out.length })
       return out
     },
     fetchSessionTitle: async (sessionID) => {
       // Best-effort; like fetchHistory we tolerate SDK shape drift across
-      // opencode versions. v1 takes `{ path: { id } }`, v2 takes `{ id }`
-      // or `{ sessionID }`. Some clients wrap the response in `.data`.
+      // opencode versions. The OpenAPI spec for /session/{id} expects
+      // { path: { id } }; older clients accepted { id } or { sessionID }.
+      // The typed SDK wraps the response in { data, error, ... }.
       const anyClient = input.client as any
-      const get = anyClient?.session?.get
+      const sessionAPI = anyClient?.session
+      const get = sessionAPI?.get
       if (typeof get !== "function") return undefined
-      const tryShapes: any[] = [{ id: sessionID }, { sessionID }, { path: { id: sessionID } }]
+      const tryShapes: any[] = [{ path: { id: sessionID } }, { id: sessionID }, { sessionID }]
       for (const args of tryShapes) {
-        const res = await get.call(anyClient.session, args).catch(() => undefined)
-        if (res === undefined) continue
-        const info = res?.data ?? res
+        let res: any
+        try {
+          res = await get.call(sessionAPI, args)
+        } catch {
+          continue
+        }
+        if (res && typeof res === "object" && "error" in res && res.error !== undefined && res.data === undefined) continue
+        const info = (res && typeof res === "object" && "data" in res ? res.data : res) ?? undefined
         const title = info?.title
         if (typeof title === "string" && title.length) return title
       }
