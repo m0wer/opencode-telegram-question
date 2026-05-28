@@ -107,7 +107,6 @@ function renderQuestion(prompt, context) {
     keyboard.push([{ text: "Type your own answer", callback_data: CB.custom }]);
   if (prompt.multiple)
     keyboard.push([{ text: "Done", callback_data: CB.done }]);
-  keyboard.push([{ text: "Cancel", callback_data: CB.cancel }]);
   return { text: lines.join(`
 `), keyboard };
 }
