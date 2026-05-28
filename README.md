@@ -24,9 +24,13 @@ keep working across minor opencode upgrades.
    `custom` flags).
 2. This plugin's `event` hook receives that event, sends one Telegram
    message per sub-question, with inline-keyboard buttons for each option
-   plus a "Type your own answer" entry. The first message also includes a
-   short transcript of the last few session messages for context (text,
-   reasoning, and tool titles). There is intentionally no "Cancel"
+   plus a "Type your own answer" entry. Each message is formatted with
+   Telegram HTML (bold header, italic session label and "Recent context"
+   prefix) and labeled with the source session's title so it's obvious
+   which opencode session asked when several sessions share the bot. The
+   first message also includes a short transcript of the last few session
+   messages for context (text, reasoning, and tool titles). There is
+   intentionally no "Cancel"
    button: rejecting a question propagates as a tool error, and a misclick
    on a phone keyboard shouldn't be able to kill an in-flight request. To
    cancel, reject from the CLI/TUI; the plugin will then delete its stale
@@ -125,7 +129,7 @@ Add it to `~/.config/opencode/opencode.json`:
 ```
 
 opencode resolves the spec through npm, which fetches the repo straight from
-GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.3.0`.
+GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.4.0`.
 
 For local development, clone and reference the built file directly:
 

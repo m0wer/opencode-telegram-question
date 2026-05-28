@@ -26,17 +26,19 @@ function makeTelegramClient(token) {
       const result = await call("sendMessage", {
         chat_id: chatID,
         text,
+        ...opts?.parseMode && { parse_mode: opts.parseMode },
         ...opts?.replyTo && { reply_to_message_id: opts.replyTo, allow_sending_without_reply: true },
         ...reply_markup && { reply_markup }
       });
       return { message_id: result.message_id };
     },
-    async editMessage(chatID, messageID, text, keyboard) {
+    async editMessage(chatID, messageID, text, keyboard, opts) {
       try {
         await call("editMessageText", {
           chat_id: chatID,
           message_id: messageID,
           text,
+          ...opts?.parseMode && { parse_mode: opts.parseMode },
           ...keyboard && { reply_markup: { inline_keyboard: keyboard } }
         });
       } catch (err) {
@@ -77,25 +79,35 @@ var CB = {
   cancel: "x",
   quick: (idx) => `q:${idx}`
 };
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function describeOption(label, description) {
+  if (!description || description.trim() === label.trim())
+    return "";
+  return ` (${escapeHtml(description)})`;
+}
 function renderQuestion(prompt, context) {
   const lines = [];
-  if (context.total > 1)
-    lines.push(`Question ${context.index + 1}/${context.total}: ${prompt.header}`);
-  else
-    lines.push(prompt.header);
+  if (context.sessionTitle)
+    lines.push(`<i>Session:</i> ${escapeHtml(context.sessionTitle)}`);
+  if (context.transcript) {
+    lines.push(`<i>Recent context:</i>`);
+    lines.push(escapeHtml(context.transcript));
+  }
+  if (lines.length)
+    lines.push("");
+  const header = escapeHtml(prompt.header);
+  const counter = context.total > 1 ? `<i>Question ${context.index + 1}/${context.total}:</i> ` : "";
+  lines.push(`${counter}<b>${header}</b>`);
   lines.push("");
-  lines.push(prompt.question);
+  lines.push(escapeHtml(prompt.question));
   if (prompt.options.length) {
     lines.push("");
     prompt.options.forEach((opt, i) => {
       const mark = context.selected.has(i) ? "✅" : "⚪";
-      lines.push(`${mark} ${i + 1}. ${opt.label}${opt.description ? ` (${opt.description})` : ""}`);
+      lines.push(`${mark} ${i + 1}. ${escapeHtml(opt.label)}${describeOption(opt.label, opt.description)}`);
     });
-  }
-  if (context.transcript) {
-    lines.unshift("");
-    lines.unshift(context.transcript);
-    lines.unshift("Recent context:");
   }
   const keyboard = prompt.options.map((opt, i) => [
     {
@@ -118,25 +130,28 @@ function renderQuestion(prompt, context) {
 }
 function renderAnsweredQuestion(prompt, context) {
   const lines = [];
-  if (context.total > 1)
-    lines.push(`Question ${context.index + 1}/${context.total}: ${prompt.header}`);
-  else
-    lines.push(prompt.header);
+  if (context.sessionTitle) {
+    lines.push(`<i>Session:</i> ${escapeHtml(context.sessionTitle)}`);
+    lines.push("");
+  }
+  const header = escapeHtml(prompt.header);
+  const counter = context.total > 1 ? `<i>Question ${context.index + 1}/${context.total}:</i> ` : "";
+  lines.push(`${counter}<b>${header}</b>`);
   lines.push("");
-  lines.push(prompt.question);
+  lines.push(escapeHtml(prompt.question));
   if (prompt.options.length) {
     lines.push("");
     prompt.options.forEach((opt, i) => {
       const mark = context.selected.has(i) ? "✅" : "⚪";
-      lines.push(`${mark} ${i + 1}. ${opt.label}${opt.description ? ` (${opt.description})` : ""}`);
+      lines.push(`${mark} ${i + 1}. ${escapeHtml(opt.label)}${describeOption(opt.label, opt.description)}`);
     });
   }
   if (context.customAnswer !== undefined) {
     lines.push("");
-    lines.push(`✍️ Your answer: ${context.customAnswer}`);
+    lines.push(`✍️ <i>Your answer:</i> ${escapeHtml(context.customAnswer)}`);
   } else {
     lines.push("");
-    lines.push("✔️ Answered from Telegram");
+    lines.push(`✔️ <i>Answered from Telegram</i>`);
   }
   return { text: lines.join(`
 `) };
@@ -203,8 +218,13 @@ function makeController(deps) {
       return [];
     });
     const transcriptText = transcript.length ? renderTranscript(transcript, deps.historyMessages) : undefined;
+    const sessionTitle = await (deps.fetchSessionTitle?.(event.sessionID) ?? Promise.resolve(undefined)).catch((err) => {
+      log("warn", "session title fetch failed", String(err));
+      return;
+    });
     const state = {
       event,
+      sessionTitle,
       messageIDs: [],
       subStates: event.questions.map(() => ({ selected: new Set, awaitingCustom: false, answered: false })),
       customPrompts: new Map,
@@ -219,9 +239,10 @@ function makeController(deps) {
         total: event.questions.length,
         selected: state.subStates[i].selected,
         transcript: i === 0 ? transcriptText : undefined,
-        quickReplies
+        quickReplies,
+        sessionTitle
       });
-      const sent = await deps.telegram.sendMessage(deps.chatID, clip(text, TELEGRAM_MAX), keyboard);
+      const sent = await deps.telegram.sendMessage(deps.chatID, clip(text, TELEGRAM_MAX), keyboard, { parseMode: "HTML" });
       state.messageIDs.push(sent.message_id);
       messageIndex.set(sent.message_id, { requestID: event.id, subIndex: i });
     }
@@ -251,10 +272,11 @@ function makeController(deps) {
       index: subIndex,
       total: state.event.questions.length,
       selected: sub.selected,
-      quickReplies
+      quickReplies,
+      sessionTitle: state.sessionTitle
     });
     const mid = state.messageIDs[subIndex];
-    await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX), keyboard);
+    await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX), keyboard, { parseMode: "HTML" });
   }
   async function trySubmit(state) {
     if (state.closed)
@@ -282,8 +304,8 @@ function makeController(deps) {
       if (state.answeredFromTelegram) {
         const prompt = state.event.questions[i];
         const sub = state.subStates[i];
-        const { text } = renderAnsweredQuestion(prompt, { index: i, total: state.event.questions.length, selected: sub.selected, customAnswer: sub.customAnswer });
-        await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX)).catch(() => {});
+        const { text } = renderAnsweredQuestion(prompt, { index: i, total: state.event.questions.length, selected: sub.selected, customAnswer: sub.customAnswer, sessionTitle: state.sessionTitle });
+        await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX), undefined, { parseMode: "HTML" }).catch(() => {});
         await deps.telegram.removeKeyboard(deps.chatID, mid).catch(() => {});
       } else {
         await deps.telegram.deleteMessage(deps.chatID, mid).catch(() => {});
@@ -921,6 +943,25 @@ var TelegramQuestionPlugin = async (input, options) => {
           out.push({ role: info?.role ?? "?", text });
       }
       return out;
+    },
+    fetchSessionTitle: async (sessionID) => {
+      const anyClient = input.client;
+      const get = anyClient?.session?.get;
+      if (typeof get !== "function")
+        return;
+      const tryShapes = [{ id: sessionID }, { sessionID }, { path: { id: sessionID } }];
+      for (const args of tryShapes) {
+        const res = await get.call(anyClient.session, args).catch(() => {
+          return;
+        });
+        if (res === undefined)
+          continue;
+        const info = res?.data ?? res;
+        const title = info?.title;
+        if (typeof title === "string" && title.length)
+          return title;
+      }
+      return;
     },
     replyToOpencode: async (requestID, answers) => {
       const client = input.client;
