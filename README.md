@@ -78,6 +78,12 @@ order and submits a single combined answer. The window is configurable
 via the `freeTextDebounceMs` option on the controller; the default is a
 safe choice for typical reply latency.
 
+You can configure a list of stock free-text answers via `quickReplies`.
+Each appears as an extra one-tap button below the options on every
+question; tapping it submits the configured string as the answer. This
+is useful for recurring responses like "decide yourself", "skip", or
+"ask later" without having to type them every time.
+
 ## Setup
 
 ### 1. Create a Telegram bot
@@ -107,7 +113,11 @@ Add it to `~/.config/opencode/opencode.json`:
       {
         "botToken": "123456:AA...",
         "chatId": 987654321,
-        "historyMessages": 3
+        "historyMessages": 3,
+        "quickReplies": [
+          "Decide yourself. Continue with all remaining tasks and gaps without checkpoints; choose the order. Take decisions autonomously.",
+          "Skip this one and move on."
+        ]
       }
     ]
   ]
@@ -115,7 +125,7 @@ Add it to `~/.config/opencode/opencode.json`:
 ```
 
 opencode resolves the spec through npm, which fetches the repo straight from
-GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.2.3`.
+GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.3.0`.
 
 For local development, clone and reference the built file directly:
 
@@ -154,6 +164,7 @@ Options:
 | `botToken` | `TELEGRAM_BOT_TOKEN` | (required) | From [@BotFather](https://t.me/BotFather) |
 | `chatId` | `TELEGRAM_CHAT_ID` | (required) | Your numeric user id from [@userinfobot](https://t.me/userinfobot) |
 | `historyMessages` | `OPENCODE_TELEGRAM_HISTORY` | `3` | Lines of recent history prepended to the first sub-question |
+| `quickReplies` | `OPENCODE_TELEGRAM_QUICK_REPLIES` | `[]` | List of stock free-text answers shown as extra one-tap buttons after the options. Tapping one submits its text as the answer. The env-var form accepts either a JSON array (e.g. `'["decide yourself","skip"]'`) or a comma-separated list. |
 | `logFile` | (n/a) | platform default | Path to the plugin log file. Defaults to `$XDG_STATE_HOME/opencode-telegram-question/plugin.log` (POSIX) or `%LOCALAPPDATA%\opencode-telegram-question\plugin.log` (Windows). The plugin never writes to stdout/stderr, so the TUI stays clean; tail this file when debugging. |
 
 If either credential is missing the plugin disables itself (with a warning)
@@ -192,6 +203,7 @@ bun run build
 ```
 
 Tests cover: single-choice, multi-choice, free-text with `force_reply`,
+quick-reply buttons (rendering, submit, prompt cleanup, range checks),
 concurrent custom-prompt routing via `reply_to_message`, split-chunk
 coalescing for long free-text replies (in-order and out-of-order
 delivery), CLI-resolves-during-buffer cancellation, multi sub-question

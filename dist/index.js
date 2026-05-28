@@ -74,7 +74,8 @@ var CB = {
   option: (idx) => `o:${idx}`,
   custom: "c",
   done: "d",
-  cancel: "x"
+  cancel: "x",
+  quick: (idx) => `q:${idx}`
 };
 function renderQuestion(prompt, context) {
   const lines = [];
@@ -107,6 +108,11 @@ function renderQuestion(prompt, context) {
     keyboard.push([{ text: "Type your own answer", callback_data: CB.custom }]);
   if (prompt.multiple)
     keyboard.push([{ text: "Done", callback_data: CB.done }]);
+  if (context.quickReplies) {
+    for (let i = 0;i < context.quickReplies.length; i++) {
+      keyboard.push([{ text: context.quickReplies[i], callback_data: CB.quick(i) }]);
+    }
+  }
   return { text: lines.join(`
 `), keyboard };
 }
@@ -182,6 +188,7 @@ function makeController(deps) {
   const messageIndex = new Map;
   const log = deps.log ?? (() => {});
   const freeTextDebounceMs = deps.freeTextDebounceMs ?? 1500;
+  const quickReplies = deps.quickReplies ?? [];
   function clearFreeTextTimers(state) {
     for (const buf of state.freeTextBuffers.values()) {
       if (buf.timer)
@@ -211,7 +218,8 @@ function makeController(deps) {
         index: i,
         total: event.questions.length,
         selected: state.subStates[i].selected,
-        transcript: i === 0 ? transcriptText : undefined
+        transcript: i === 0 ? transcriptText : undefined,
+        quickReplies
       });
       const sent = await deps.telegram.sendMessage(deps.chatID, clip(text, TELEGRAM_MAX), keyboard);
       state.messageIDs.push(sent.message_id);
@@ -242,7 +250,8 @@ function makeController(deps) {
     const { text, keyboard } = renderQuestion(prompt, {
       index: subIndex,
       total: state.event.questions.length,
-      selected: sub.selected
+      selected: sub.selected,
+      quickReplies
     });
     const mid = state.messageIDs[subIndex];
     await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX), keyboard);
@@ -329,6 +338,24 @@ function makeController(deps) {
         sub.answered = true;
         await trySubmit(state);
       }
+      return;
+    }
+    if (cb.data.startsWith("q:")) {
+      const idx = Number(cb.data.slice(2));
+      if (!Number.isInteger(idx) || idx < 0 || idx >= quickReplies.length)
+        return;
+      for (const [pmid, sIdx] of state.customPrompts) {
+        if (sIdx === target.subIndex) {
+          state.customPrompts.delete(pmid);
+          const buf = state.freeTextBuffers.get(pmid);
+          if (buf?.timer)
+            clearTimeout(buf.timer);
+          state.freeTextBuffers.delete(pmid);
+          await deps.telegram.deleteMessage(deps.chatID, pmid).catch(() => {});
+        }
+      }
+      applyFreeText(state, target.subIndex, quickReplies[idx]);
+      await trySubmit(state);
       return;
     }
     if (cb.data.startsWith("o:")) {
@@ -847,6 +874,7 @@ var TelegramQuestionPlugin = async (input, options) => {
   const chatIdRaw = opts.chatId ?? process.env.TELEGRAM_CHAT_ID;
   const historyMessages = opts.historyMessages ?? Number(process.env.OPENCODE_TELEGRAM_HISTORY ?? 3);
   const log = makeFileLogger(opts.logFile ?? defaultLogFile());
+  const quickReplies = opts.quickReplies ?? parseQuickRepliesEnv(process.env.OPENCODE_TELEGRAM_QUICK_REPLIES, log);
   if (!token || chatIdRaw === undefined || chatIdRaw === "") {
     log("warn", "disabled: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID (set in opencode.json plugin options or env)");
     return {};
@@ -861,6 +889,7 @@ var TelegramQuestionPlugin = async (input, options) => {
     telegram,
     chatID,
     historyMessages,
+    quickReplies,
     fetchHistory: async (sessionID) => {
       const anyClient = input.client;
       const sessionAPI = anyClient?.session;
@@ -985,6 +1014,26 @@ var TelegramQuestionPlugin = async (input, options) => {
     }
   };
 };
+function parseQuickRepliesEnv(raw, log) {
+  if (!raw)
+    return [];
+  const trimmed = raw.trim();
+  if (!trimmed)
+    return [];
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed) && parsed.every((s) => typeof s === "string"))
+        return parsed;
+      log("warn", "OPENCODE_TELEGRAM_QUICK_REPLIES JSON is not an array of strings", { value: trimmed });
+      return [];
+    } catch (err) {
+      log("warn", "OPENCODE_TELEGRAM_QUICK_REPLIES JSON parse failed", String(err));
+      return [];
+    }
+  }
+  return trimmed.split(",").map((s) => s.trim()).filter(Boolean);
+}
 var src_default = { server: TelegramQuestionPlugin, id: "opencode-telegram-question" };
 export {
   src_default as default
