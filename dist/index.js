@@ -920,20 +920,34 @@ var TelegramQuestionPlugin = async (input, options) => {
         log("warn", "session.messages SDK method not found", { keys: sessionAPI ? Object.keys(sessionAPI) : null });
         return [];
       }
-      const tryShapes = [{ sessionID }, { path: { id: sessionID } }];
+      const tryShapes = [{ path: { id: sessionID } }, { sessionID }, { id: sessionID }];
       let res;
+      let lastErr;
       for (const args of tryShapes) {
-        res = await messages.call(sessionAPI, args).catch(() => {
-          return;
-        });
+        try {
+          res = await messages.call(sessionAPI, args);
+        } catch (err) {
+          lastErr = err;
+          res = undefined;
+          continue;
+        }
+        if (res && typeof res === "object" && "error" in res && res.error !== undefined && res.data === undefined) {
+          lastErr = res.error;
+          res = undefined;
+          continue;
+        }
         if (res !== undefined)
           break;
       }
       if (res === undefined) {
-        log("warn", "session.messages returned no data for either SDK shape");
+        log("warn", "session.messages returned no data for any SDK shape", { err: String(lastErr ?? "") });
         return [];
       }
       const data = Array.isArray(res) ? res : res?.data ?? res?.items ?? [];
+      if (!Array.isArray(data) || data.length === 0) {
+        log("info", "session.messages returned empty payload", { shape: Array.isArray(res) ? "bare-array" : Object.keys(res ?? {}) });
+        return [];
+      }
       const out = [];
       for (const m of data) {
         const info = m.info ?? m;
@@ -942,21 +956,26 @@ var TelegramQuestionPlugin = async (input, options) => {
         if (text)
           out.push({ role: info?.role ?? "?", text });
       }
+      log("info", "session.messages transcript built", { rawMessages: data.length, kept: out.length });
       return out;
     },
     fetchSessionTitle: async (sessionID) => {
       const anyClient = input.client;
-      const get = anyClient?.session?.get;
+      const sessionAPI = anyClient?.session;
+      const get = sessionAPI?.get;
       if (typeof get !== "function")
         return;
-      const tryShapes = [{ id: sessionID }, { sessionID }, { path: { id: sessionID } }];
+      const tryShapes = [{ path: { id: sessionID } }, { id: sessionID }, { sessionID }];
       for (const args of tryShapes) {
-        const res = await get.call(anyClient.session, args).catch(() => {
-          return;
-        });
-        if (res === undefined)
+        let res;
+        try {
+          res = await get.call(sessionAPI, args);
+        } catch {
           continue;
-        const info = res?.data ?? res;
+        }
+        if (res && typeof res === "object" && "error" in res && res.error !== undefined && res.data === undefined)
+          continue;
+        const info = (res && typeof res === "object" && "data" in res ? res.data : res) ?? undefined;
         const title = info?.title;
         if (typeof title === "string" && title.length)
           return title;
