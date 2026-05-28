@@ -95,6 +95,23 @@ const TelegramQuestionPlugin: Plugin = async (input, options) => {
       }
       return out
     },
+    fetchSessionTitle: async (sessionID) => {
+      // Best-effort; like fetchHistory we tolerate SDK shape drift across
+      // opencode versions. v1 takes `{ path: { id } }`, v2 takes `{ id }`
+      // or `{ sessionID }`. Some clients wrap the response in `.data`.
+      const anyClient = input.client as any
+      const get = anyClient?.session?.get
+      if (typeof get !== "function") return undefined
+      const tryShapes: any[] = [{ id: sessionID }, { sessionID }, { path: { id: sessionID } }]
+      for (const args of tryShapes) {
+        const res = await get.call(anyClient.session, args).catch(() => undefined)
+        if (res === undefined) continue
+        const info = res?.data ?? res
+        const title = info?.title
+        if (typeof title === "string" && title.length) return title
+      }
+      return undefined
+    },
     replyToOpencode: async (requestID, answers) => {
       const client = input.client as any
       const body = { answers: answers.map((a) => [...a]) }

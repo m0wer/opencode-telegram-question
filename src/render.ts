@@ -32,6 +32,24 @@ export const CB = {
   quick: (idx: number) => `q:${idx}`,
 } as const
 
+// Telegram HTML parse-mode requires that `<`, `>` and `&` be escaped in
+// any user-provided text. We assemble messages with HTML tags for bold
+// and italic but every interpolated value goes through this helper so a
+// stray `<` in a session title or question text can't corrupt the message
+// or trigger a Telegram parse error.
+export function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+
+// Render the description in parentheses only when it adds information.
+// Many callers pass the same string as both label and description (this
+// is the default behavior of opencode's `question` tool when only a
+// label is provided), which produces a redundant `name (name)` output.
+function describeOption(label: string, description: string): string {
+  if (!description || description.trim() === label.trim()) return ""
+  return ` (${escapeHtml(description)})`
+}
+
 export function renderQuestion(
   prompt: Prompt,
   context: {
@@ -40,24 +58,31 @@ export function renderQuestion(
     selected: ReadonlySet<number>
     transcript?: string
     quickReplies?: ReadonlyArray<string>
+    sessionTitle?: string
   },
 ): { text: string; keyboard: InlineKeyboard } {
   const lines: string[] = []
-  if (context.total > 1) lines.push(`Question ${context.index + 1}/${context.total}: ${prompt.header}`)
-  else lines.push(prompt.header)
+  // Top metadata: which opencode session this came from (helpful when
+  // several sessions share the bot) and any recent transcript for
+  // context. Both are italic so the bold header below stands out.
+  if (context.sessionTitle) lines.push(`<i>Session:</i> ${escapeHtml(context.sessionTitle)}`)
+  if (context.transcript) {
+    lines.push(`<i>Recent context:</i>`)
+    lines.push(escapeHtml(context.transcript))
+  }
+  if (lines.length) lines.push("")
+  // Header in bold; sub-question counter as a small prefix when relevant.
+  const header = escapeHtml(prompt.header)
+  const counter = context.total > 1 ? `<i>Question ${context.index + 1}/${context.total}:</i> ` : ""
+  lines.push(`${counter}<b>${header}</b>`)
   lines.push("")
-  lines.push(prompt.question)
+  lines.push(escapeHtml(prompt.question))
   if (prompt.options.length) {
     lines.push("")
     prompt.options.forEach((opt, i) => {
       const mark = context.selected.has(i) ? "\u2705" : "\u26AA"
-      lines.push(`${mark} ${i + 1}. ${opt.label}${opt.description ? ` (${opt.description})` : ""}`)
+      lines.push(`${mark} ${i + 1}. ${escapeHtml(opt.label)}${describeOption(opt.label, opt.description)}`)
     })
-  }
-  if (context.transcript) {
-    lines.unshift("")
-    lines.unshift(context.transcript)
-    lines.unshift("Recent context:")
   }
   const keyboard: InlineKeyboard = prompt.options.map((opt, i) => [
     {
@@ -93,26 +118,31 @@ export function renderQuestion(
 // the typed answer below.
 export function renderAnsweredQuestion(
   prompt: Prompt,
-  context: { index: number; total: number; selected: ReadonlySet<number>; customAnswer?: string },
+  context: { index: number; total: number; selected: ReadonlySet<number>; customAnswer?: string; sessionTitle?: string },
 ): { text: string } {
   const lines: string[] = []
-  if (context.total > 1) lines.push(`Question ${context.index + 1}/${context.total}: ${prompt.header}`)
-  else lines.push(prompt.header)
+  if (context.sessionTitle) {
+    lines.push(`<i>Session:</i> ${escapeHtml(context.sessionTitle)}`)
+    lines.push("")
+  }
+  const header = escapeHtml(prompt.header)
+  const counter = context.total > 1 ? `<i>Question ${context.index + 1}/${context.total}:</i> ` : ""
+  lines.push(`${counter}<b>${header}</b>`)
   lines.push("")
-  lines.push(prompt.question)
+  lines.push(escapeHtml(prompt.question))
   if (prompt.options.length) {
     lines.push("")
     prompt.options.forEach((opt, i) => {
       const mark = context.selected.has(i) ? "\u2705" : "\u26AA"
-      lines.push(`${mark} ${i + 1}. ${opt.label}${opt.description ? ` (${opt.description})` : ""}`)
+      lines.push(`${mark} ${i + 1}. ${escapeHtml(opt.label)}${describeOption(opt.label, opt.description)}`)
     })
   }
   if (context.customAnswer !== undefined) {
     lines.push("")
-    lines.push(`\u270D\uFE0F Your answer: ${context.customAnswer}`)
+    lines.push(`\u270D\uFE0F <i>Your answer:</i> ${escapeHtml(context.customAnswer)}`)
   } else {
     lines.push("")
-    lines.push("\u2714\uFE0F Answered from Telegram")
+    lines.push(`\u2714\uFE0F <i>Answered from Telegram</i>`)
   }
   return { text: lines.join("\n") }
 }

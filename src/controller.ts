@@ -21,6 +21,11 @@ export type ControllerDeps = {
   chatID: number
   historyMessages: number
   fetchHistory(sessionID: string): Promise<ReadonlyArray<{ role: string; text: string }>>
+  // Look up a human-readable session title so the bot can label each
+  // question with its source session. Useful when multiple opencode
+  // sessions share one bot, but optional: if it throws or returns
+  // undefined, questions render without the session header.
+  fetchSessionTitle?(sessionID: string): Promise<string | undefined>
   replyToOpencode(requestID: string, answers: ReadonlyArray<ReadonlyArray<string>>): Promise<void>
   rejectInOpencode(requestID: string): Promise<void>
   log?(level: "info" | "warn" | "error", msg: string, data?: unknown): void
@@ -45,6 +50,7 @@ type SubState = {
 
 type RequestState = {
   event: QuestionEvent
+  sessionTitle?: string
   messageIDs: number[] // one per sub-question
   subStates: SubState[]
   // While the user is typing a free-text answer, we record which sub-question
@@ -93,9 +99,16 @@ export function makeController(deps: ControllerDeps) {
       return []
     })
     const transcriptText = transcript.length ? renderTranscript(transcript, deps.historyMessages) : undefined
+    // Session title is purely cosmetic; never let a failure block the
+    // question from being posted.
+    const sessionTitle = await (deps.fetchSessionTitle?.(event.sessionID) ?? Promise.resolve(undefined)).catch((err) => {
+      log("warn", "session title fetch failed", String(err))
+      return undefined
+    })
 
     const state: RequestState = {
       event,
+      sessionTitle,
       messageIDs: [],
       subStates: event.questions.map(() => ({ selected: new Set<number>(), awaitingCustom: false, answered: false })),
       customPrompts: new Map(),
@@ -112,8 +125,9 @@ export function makeController(deps: ControllerDeps) {
         selected: state.subStates[i].selected,
         transcript: i === 0 ? transcriptText : undefined,
         quickReplies,
+        sessionTitle,
       })
-      const sent = await deps.telegram.sendMessage(deps.chatID, clip(text, TELEGRAM_MAX), keyboard)
+      const sent = await deps.telegram.sendMessage(deps.chatID, clip(text, TELEGRAM_MAX), keyboard, { parseMode: "HTML" })
       state.messageIDs.push(sent.message_id)
       messageIndex.set(sent.message_id, { requestID: event.id, subIndex: i })
     }
@@ -149,9 +163,10 @@ export function makeController(deps: ControllerDeps) {
       total: state.event.questions.length,
       selected: sub.selected,
       quickReplies,
+      sessionTitle: state.sessionTitle,
     })
     const mid = state.messageIDs[subIndex]
-    await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX), keyboard)
+    await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX), keyboard, { parseMode: "HTML" })
   }
 
   async function trySubmit(state: RequestState): Promise<void> {
@@ -192,8 +207,8 @@ export function makeController(deps: ControllerDeps) {
       if (state.answeredFromTelegram) {
         const prompt = state.event.questions[i]
         const sub = state.subStates[i]
-        const { text } = renderAnsweredQuestion(prompt, { index: i, total: state.event.questions.length, selected: sub.selected, customAnswer: sub.customAnswer })
-        await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX)).catch(() => {})
+        const { text } = renderAnsweredQuestion(prompt, { index: i, total: state.event.questions.length, selected: sub.selected, customAnswer: sub.customAnswer, sessionTitle: state.sessionTitle })
+        await deps.telegram.editMessage(deps.chatID, mid, clip(text, TELEGRAM_MAX), undefined, { parseMode: "HTML" }).catch(() => {})
         await deps.telegram.removeKeyboard(deps.chatID, mid).catch(() => {})
       } else {
         await deps.telegram.deleteMessage(deps.chatID, mid).catch(() => {})

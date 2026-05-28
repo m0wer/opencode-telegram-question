@@ -14,16 +14,61 @@ describe("renderQuestion", () => {
       },
       { index: 0, total: 1, selected: new Set() },
     )
-    expect(r.text).toContain("Pick color")
+    expect(r.text).toContain("<b>Pick color</b>")
     expect(r.text).toContain("Which color?")
-    expect(r.text).toContain("\u26AA 1. red")
-    expect(r.text).toContain("\u26AA 2. blue")
+    expect(r.text).toContain("\u26AA 1. red (warm)")
+    expect(r.text).toContain("\u26AA 2. blue (cool)")
     // 2 option rows + custom. No cancel button: rejecting a question is
     // destructive and a misclick shouldn't kill the request.
     expect(r.keyboard).toHaveLength(3)
     expect(r.keyboard[0][0].callback_data).toBe(CB.option(0))
     expect(r.keyboard[2][0].callback_data).toBe(CB.custom)
     expect(r.keyboard.flat().some((b) => b.callback_data === CB.cancel)).toBe(false)
+  })
+
+  test("omits parenthetical when description duplicates the label", () => {
+    const r = renderQuestion(
+      {
+        header: "h",
+        question: "q",
+        options: [
+          { label: "All done", description: "All done" },
+          { label: "Skip", description: "" },
+        ],
+      },
+      { index: 0, total: 1, selected: new Set() },
+    )
+    expect(r.text).toContain("\u26AA 1. All done")
+    expect(r.text).not.toContain("All done (All done)")
+    expect(r.text).toContain("\u26AA 2. Skip")
+    expect(r.text).not.toContain("Skip (")
+  })
+
+  test("renders sessionTitle header above the question", () => {
+    const r = renderQuestion(
+      { header: "Pick", question: "q", options: [] },
+      { index: 0, total: 1, selected: new Set(), sessionTitle: "Processing books and papers" },
+    )
+    expect(r.text.startsWith("<i>Session:</i> Processing books and papers")).toBe(true)
+    expect(r.text.indexOf("<b>Pick</b>")).toBeGreaterThan(r.text.indexOf("Session:"))
+  })
+
+  test("escapes HTML metacharacters in headers, questions, options and session title", () => {
+    const r = renderQuestion(
+      {
+        header: "h<1>&",
+        question: "q<2>",
+        options: [{ label: "o<3>", description: "d<4>" }],
+      },
+      { index: 0, total: 1, selected: new Set(), sessionTitle: "s<5>&" },
+    )
+    expect(r.text).toContain("h&lt;1&gt;&amp;")
+    expect(r.text).toContain("q&lt;2&gt;")
+    expect(r.text).toContain("o&lt;3&gt; (d&lt;4&gt;)")
+    expect(r.text).toContain("s&lt;5&gt;&amp;")
+    // Tags we control must remain unescaped.
+    expect(r.text).toContain("<b>")
+    expect(r.text).toContain("<i>")
   })
 
   test("omits custom row when custom is false", () => {
@@ -110,7 +155,7 @@ describe("renderQuestion", () => {
       { header: "h", question: "q", options: [] },
       { index: 0, total: 1, selected: new Set(), transcript: "user: hi\nassistant: hello" },
     )
-    expect(r.text.startsWith("Recent context:")).toBe(true)
+    expect(r.text.startsWith("<i>Recent context:</i>")).toBe(true)
     expect(r.text).toContain("assistant: hello")
   })
 })
@@ -181,7 +226,7 @@ describe("renderAnsweredQuestion", () => {
       { header: "h", question: "q", options: [{ label: "a", description: "" }] },
       { index: 0, total: 1, selected: new Set(), customAnswer: "hello world" },
     )
-    expect(r.text).toContain("Your answer: hello world")
+    expect(r.text).toContain("Your answer:</i> hello world")
     expect(r.text).not.toContain("Answered from Telegram")
   })
 })

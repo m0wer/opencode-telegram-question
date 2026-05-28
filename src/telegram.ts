@@ -28,9 +28,9 @@ export interface TelegramClient {
     chatID: number,
     text: string,
     keyboard?: InlineKeyboard,
-    options?: { replyTo?: number; forceReply?: boolean },
+    options?: { replyTo?: number; forceReply?: boolean; parseMode?: "HTML" | "MarkdownV2" },
   ): Promise<{ message_id: number }>
-  editMessage(chatID: number, messageID: number, text: string, keyboard?: InlineKeyboard): Promise<void>
+  editMessage(chatID: number, messageID: number, text: string, keyboard?: InlineKeyboard, options?: { parseMode?: "HTML" | "MarkdownV2" }): Promise<void>
   removeKeyboard(chatID: number, messageID: number): Promise<void>
   deleteMessage(chatID: number, messageID: number): Promise<void>
   answerCallback(callbackID: string, text?: string): Promise<void>
@@ -64,17 +64,19 @@ export function makeTelegramClient(token: string): TelegramClient {
       const result = await call("sendMessage", {
         chat_id: chatID,
         text,
+        ...(opts?.parseMode && { parse_mode: opts.parseMode }),
         ...(opts?.replyTo && { reply_to_message_id: opts.replyTo, allow_sending_without_reply: true }),
         ...(reply_markup && { reply_markup }),
       })
       return { message_id: result.message_id }
     },
-    async editMessage(chatID, messageID, text, keyboard) {
+    async editMessage(chatID, messageID, text, keyboard, opts) {
       try {
         await call("editMessageText", {
           chat_id: chatID,
           message_id: messageID,
           text,
+          ...(opts?.parseMode && { parse_mode: opts.parseMode }),
           ...(keyboard && { reply_markup: { inline_keyboard: keyboard } }),
         })
       } catch (err) {
