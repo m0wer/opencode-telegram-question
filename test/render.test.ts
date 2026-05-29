@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { renderQuestion, renderAnsweredQuestion, selectionToAnswer, renderTranscript, clip, summarizePart, CB } from "../src/render"
+import { renderQuestion, renderAnsweredQuestion, selectionToAnswer, renderTranscript, clip, clipTail, summarizePart, CB, MAX_ANSWER_DISPLAY } from "../src/render"
 
 describe("renderQuestion", () => {
   test("renders header, question, options, and one keyboard button per option plus the custom row", () => {
@@ -202,6 +202,38 @@ describe("renderTranscript", () => {
     expect(out).toContain("assistant: ok")
     expect(out).toContain("user: again")
   })
+
+  test("clips the last message from its tail with a generous budget", () => {
+    const last = "intro details " + "x".repeat(2000) + " FINAL CONCLUSION"
+    const out = renderTranscript([{ role: "assistant", text: last }], 1, { lastMessageChars: 40 })
+    // Tail kept: the conclusion survives, the intro is dropped.
+    expect(out).toContain("FINAL CONCLUSION")
+    expect(out).not.toContain("intro details")
+    expect(out.startsWith("assistant: \u2026")).toBe(true)
+  })
+
+  test("preserves newlines in the last message (e.g. a next-steps list)", () => {
+    const last = "Summary line\n1. first\n2. second"
+    const out = renderTranscript([{ role: "assistant", text: last }], 1)
+    expect(out).toContain("1. first\n2. second")
+  })
+
+  test("older messages stay short and head-clipped", () => {
+    const older = "y".repeat(1000)
+    const out = renderTranscript(
+      [
+        { role: "user", text: older },
+        { role: "assistant", text: "short tail" },
+      ],
+      2,
+      { olderMessageChars: 50 },
+    )
+    const userLine = out.split("\n").find((l) => l.startsWith("user:")) ?? ""
+    // Head-clipped older message ends with an ellipsis and is bounded.
+    expect(userLine.endsWith("\u2026")).toBe(true)
+    expect(userLine.length).toBeLessThanOrEqual("user: ".length + 50)
+    expect(out).toContain("assistant: short tail")
+  })
 })
 
 describe("renderAnsweredQuestion", () => {
@@ -229,12 +261,33 @@ describe("renderAnsweredQuestion", () => {
     expect(r.text).toContain("Your answer:</i> hello world")
     expect(r.text).not.toContain("Answered from Telegram")
   })
+  test("clips a long custom answer from the head to keep the record tidy", () => {
+    const longAnswer = "BEGINNING " + "z".repeat(MAX_ANSWER_DISPLAY * 2) + " THE END"
+    const r = renderAnsweredQuestion(
+      { header: "h", question: "q", options: [{ label: "a", description: "" }] },
+      { index: 0, total: 1, selected: new Set(), customAnswer: longAnswer },
+    )
+    const answerLine = r.text.split("\n").find((l) => l.includes("Your answer:")) ?? ""
+    expect(answerLine).toContain("BEGINNING")
+    expect(answerLine).not.toContain("THE END")
+    expect(answerLine).toContain("\u2026")
+    // The visible answer portion is bounded by MAX_ANSWER_DISPLAY.
+    const visible = answerLine.split("Your answer:</i> ")[1] ?? ""
+    expect(visible.length).toBeLessThanOrEqual(MAX_ANSWER_DISPLAY)
+  })
 })
 
 describe("clip", () => {
   test("truncates with ellipsis", () => {
     expect(clip("abcdef", 4)).toBe("abc\u2026")
     expect(clip("abc", 10)).toBe("abc")
+  })
+})
+
+describe("clipTail", () => {
+  test("keeps the tail and prefixes an ellipsis", () => {
+    expect(clipTail("abcdef", 4)).toBe("\u2026def")
+    expect(clipTail("abc", 10)).toBe("abc")
   })
 })
 

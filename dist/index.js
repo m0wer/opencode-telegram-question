@@ -72,6 +72,7 @@ function makeTelegramClient(token) {
 }
 
 // src/render.ts
+var MAX_ANSWER_DISPLAY = 300;
 var CB = {
   option: (idx) => `o:${idx}`,
   custom: "c",
@@ -148,7 +149,7 @@ function renderAnsweredQuestion(prompt, context) {
   }
   if (context.customAnswer !== undefined) {
     lines.push("");
-    lines.push(`✍️ <i>Your answer:</i> ${escapeHtml(context.customAnswer)}`);
+    lines.push(`✍️ <i>Your answer:</i> ${escapeHtml(clip(context.customAnswer, MAX_ANSWER_DISPLAY))}`);
   } else {
     lines.push("");
     lines.push(`✔️ <i>Answered from Telegram</i>`);
@@ -166,8 +167,25 @@ function clip(s, max) {
     return s;
   return s.slice(0, max - 1) + "…";
 }
-function renderTranscript(messages, max) {
-  return messages.slice(-max).map((m) => `${m.role}: ${clip(m.text.replace(/\s+/g, " ").trim(), 240)}`).join(`
+function clipTail(s, max) {
+  if (s.length <= max)
+    return s;
+  return "…" + s.slice(s.length - (max - 1));
+}
+function renderTranscript(messages, max, opts) {
+  const lastMessageChars = opts?.lastMessageChars ?? 1200;
+  const olderMessageChars = opts?.olderMessageChars ?? 240;
+  const slice = messages.slice(-max);
+  return slice.map((m, i) => {
+    const isLast = i === slice.length - 1;
+    if (isLast) {
+      const cleaned = m.text.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, `
+
+`).trim();
+      return `${m.role}: ${clipTail(cleaned, lastMessageChars)}`;
+    }
+    return `${m.role}: ${clip(m.text.replace(/\s+/g, " ").trim(), olderMessageChars)}`;
+  }).join(`
 `);
 }
 function summarizePart(part) {
@@ -583,34 +601,64 @@ function ipcPathFor(token) {
     return `\\\\?\\pipe\\opencode-telegram-${id}`;
   return path.join(tmpdir(), `opencode-telegram-${id}.sock`);
 }
+var DEFAULT_HEARTBEAT_MS = 5000;
+var DEFAULT_HEARTBEAT_TIMEOUT_MS = 15000;
 async function joinOrLead(opts) {
   const listen = opts.netListen ?? defaultNetListen;
   const connect = opts.netConnect ?? defaultNetConnect;
   const unlinkStale = opts.unlinkStaleSocket ?? defaultUnlinkStale;
+  const hb = {
+    heartbeatMs: opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
+    heartbeatTimeoutMs: opts.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS
+  };
   const probe = await pathExists(opts.path) ? await tryConnect(connect, opts.path) : undefined;
   if (probe)
-    return makeFollower(probe);
+    return makeFollower(probe, hb);
   const first = await tryListen(listen, opts.path);
   if (first.ok)
-    return makeLeader(first.server);
+    return makeLeader(first.server, hb);
   if (first.code === "EADDRINUSE") {
     const second = await pathExists(opts.path) ? await tryConnect(connect, opts.path) : undefined;
     if (second)
-      return makeFollower(second);
+      return makeFollower(second, hb);
     await unlinkStale(opts.path).catch(() => {});
     const third = await tryListen(listen, opts.path);
     if (third.ok)
-      return makeLeader(third.server);
+      return makeLeader(third.server, hb);
   }
   throw new Error(`opencode-telegram-question: cannot bind nor connect IPC at ${opts.path}: ${first.code ?? "unknown"}`);
 }
-function makeLeader(server) {
-  const peers = new Set;
+function makeLeader(server, hb) {
+  const peers = new Map;
+  let pingTimer = null;
+  function startHeartbeat() {
+    if (hb.heartbeatMs <= 0 || pingTimer)
+      return;
+    pingTimer = setInterval(() => {
+      const now = Date.now();
+      const line = JSON.stringify({ type: "ping" }) + `
+`;
+      for (const [peer, meta] of peers) {
+        if (now - meta.lastSeen > hb.heartbeatTimeoutMs) {
+          peers.delete(peer);
+          peer.destroy();
+          continue;
+        }
+        if (peer.writable)
+          peer.write(line);
+      }
+    }, hb.heartbeatMs);
+    pingTimer.unref?.();
+  }
   server.on("connection", (socket) => {
     socket.setEncoding("utf8");
-    peers.add(socket);
+    peers.set(socket, { lastSeen: Date.now() });
+    startHeartbeat();
     let buffer = "";
     socket.on("data", (chunk) => {
+      const meta = peers.get(socket);
+      if (meta)
+        meta.lastSeen = Date.now();
       buffer += chunk;
       let nl;
       while ((nl = buffer.indexOf(`
@@ -632,7 +680,7 @@ function makeLeader(server) {
     broadcast(message) {
       const line = JSON.stringify(message) + `
 `;
-      for (const peer of peers) {
+      for (const peer of peers.keys()) {
         if (!peer.writable)
           continue;
         peer.write(line);
@@ -640,18 +688,44 @@ function makeLeader(server) {
     },
     followerCount: () => peers.size,
     close: () => new Promise((resolve) => {
-      for (const peer of peers)
+      if (pingTimer)
+        clearInterval(pingTimer);
+      pingTimer = null;
+      for (const peer of peers.keys())
         peer.destroy();
       server.close(() => resolve());
     })
   };
 }
-function makeFollower(socket) {
+function makeFollower(socket, hb) {
   socket.setEncoding("utf8");
   const handlers = new Set;
   const disconnectHandlers = new Set;
   let buffer = "";
+  let lastSeen = Date.now();
+  let watchdog = null;
+  let disconnected = false;
+  function fireDisconnect(err) {
+    if (disconnected)
+      return;
+    disconnected = true;
+    if (watchdog)
+      clearInterval(watchdog);
+    watchdog = null;
+    for (const h of disconnectHandlers)
+      h(err);
+  }
+  if (hb.heartbeatMs > 0) {
+    watchdog = setInterval(() => {
+      if (Date.now() - lastSeen > hb.heartbeatTimeoutMs) {
+        socket.destroy();
+        fireDisconnect(new Error("ipc heartbeat timeout"));
+      }
+    }, hb.heartbeatMs);
+    watchdog.unref?.();
+  }
   socket.on("data", (chunk) => {
+    lastSeen = Date.now();
     buffer += chunk;
     let nl;
     while ((nl = buffer.indexOf(`
@@ -663,18 +737,20 @@ function makeFollower(socket) {
       const parsed = safeParse(line);
       if (!parsed)
         continue;
+      if (parsed.type === "ping") {
+        if (socket.writable)
+          socket.write(JSON.stringify({ type: "pong" }) + `
+`);
+        continue;
+      }
+      if (parsed.type === "pong")
+        continue;
       for (const h of handlers)
         h(parsed);
     }
   });
-  socket.on("close", () => {
-    for (const h of disconnectHandlers)
-      h();
-  });
-  socket.on("error", (err) => {
-    for (const h of disconnectHandlers)
-      h(err);
-  });
+  socket.on("close", () => fireDisconnect());
+  socket.on("error", (err) => fireDisconnect(err));
   return {
     role: "follower",
     onMessage(h) {
@@ -686,6 +762,9 @@ function makeFollower(socket) {
       return () => disconnectHandlers.delete(h);
     },
     close: () => new Promise((resolve) => {
+      if (watchdog)
+        clearInterval(watchdog);
+      watchdog = null;
       if (socket.destroyed)
         return resolve();
       socket.once("close", () => resolve());
@@ -786,9 +865,16 @@ async function runCoordinator(deps, onUpdate) {
 async function runAsLeader(deps, onUpdate, role) {
   let offset = 0;
   const log = deps.log ?? (() => {});
+  const pollTimeoutSec = deps.pollTimeoutSec ?? 30;
+  const pollWatchdogMs = (deps.pollWatchdogSec ?? pollTimeoutSec + 10) * 1000;
   while (!deps.signal.aborted) {
+    const pollAbort = new AbortController;
+    const onShutdown = () => pollAbort.abort();
+    deps.signal.addEventListener("abort", onShutdown, { once: true });
+    const watchdog = setTimeout(() => pollAbort.abort(), pollWatchdogMs);
+    watchdog.unref?.();
     try {
-      const updates = await deps.telegram.getUpdates(offset, 30, deps.signal);
+      const updates = await deps.telegram.getUpdates(offset, pollTimeoutSec, pollAbort.signal);
       for (const u of updates) {
         offset = Math.max(offset, u.update_id + 1);
         if (role && role.role === "leader")
@@ -800,6 +886,9 @@ async function runAsLeader(deps, onUpdate, role) {
         break;
       log("warn", "leader poll error, retrying in 5s", String(err));
       await sleep(5000, deps.signal);
+    } finally {
+      clearTimeout(watchdog);
+      deps.signal.removeEventListener("abort", onShutdown);
     }
   }
   if (role && role.role === "leader")

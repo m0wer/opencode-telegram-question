@@ -29,7 +29,10 @@ keep working across minor opencode upgrades.
    prefix) and labeled with the source session's title so it's obvious
    which opencode session asked when several sessions share the bot. The
    first message also includes a short transcript of the last few session
-   messages for context (text, reasoning, and tool titles). There is
+   messages for context (text, reasoning, and tool titles). The most recent
+   message gets a generous budget shown from its tail (the end of the last
+   message usually carries the detail the question is about); older messages
+   are kept short as breadcrumbs. There is
    intentionally no "Cancel"
    button: rejecting a question propagates as a tool error, and a misclick
    on a phone keyboard shouldn't be able to kill an in-flight request. To

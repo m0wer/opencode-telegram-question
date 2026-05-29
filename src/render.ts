@@ -21,6 +21,12 @@ export type Prompt = {
 export type InlineButton = { text: string; callback_data: string }
 export type InlineKeyboard = InlineButton[][]
 
+// Maximum number of characters of a free-text answer to echo back in the
+// answered-question record. The user always has the full text in their own
+// sent-messages history; the bot's record is just a confirmation, so we cap
+// it to keep the chat tidy.
+export const MAX_ANSWER_DISPLAY = 300
+
 // Telegram limits callback_data to 64 bytes. We encode actions as compact
 // strings: `o:<idx>` (option toggle), `c` (custom-text mode), `d` (done for
 // multi-select), `x` (cancel), `q:<idx>` (quick reply, stock free-text).
@@ -139,7 +145,11 @@ export function renderAnsweredQuestion(
   }
   if (context.customAnswer !== undefined) {
     lines.push("")
-    lines.push(`\u270D\uFE0F <i>Your answer:</i> ${escapeHtml(context.customAnswer)}`)
+    // Clip the echoed free-text answer: long answers bloat the question
+    // record without adding value (the full text is still in the user's own
+    // sent-messages history). Keep the head: free-text answers typically
+    // front-load the key point, so the start is the most representative.
+    lines.push(`\u270D\uFE0F <i>Your answer:</i> ${escapeHtml(clip(context.customAnswer, MAX_ANSWER_DISPLAY))}`)
   } else {
     lines.push("")
     lines.push(`\u2714\uFE0F <i>Answered from Telegram</i>`)
@@ -164,13 +174,40 @@ export function clip(s: string, max: number): string {
   return s.slice(0, max - 1) + "\u2026"
 }
 
+// Truncate a string preserving the TAIL (the end), prefixing an ellipsis.
+// The last message before a question usually ends with the details the
+// question is about (a summary, a list of next steps, the thing being
+// asked), so when it's too long to show in full we keep the end rather
+// than the start.
+export function clipTail(s: string, max: number): string {
+  if (s.length <= max) return s
+  return "\u2026" + s.slice(s.length - (max - 1))
+}
+
+// Render recent session context. The most recent message is the one most
+// likely to carry the detail the question hinges on, so it gets a generous
+// budget shown from its tail; older messages are kept short (head-clipped)
+// purely as breadcrumbs. Newlines inside the last message are preserved so
+// structure (e.g. a numbered "next steps" list) survives.
 export function renderTranscript(
   messages: ReadonlyArray<{ role: string; text: string }>,
   max: number,
+  opts?: { lastMessageChars?: number; olderMessageChars?: number },
 ): string {
-  return messages
-    .slice(-max)
-    .map((m) => `${m.role}: ${clip(m.text.replace(/\s+/g, " ").trim(), 240)}`)
+  const lastMessageChars = opts?.lastMessageChars ?? 1200
+  const olderMessageChars = opts?.olderMessageChars ?? 240
+  const slice = messages.slice(-max)
+  return slice
+    .map((m, i) => {
+      const isLast = i === slice.length - 1
+      if (isLast) {
+        // Keep newlines; only collapse runs of spaces/tabs and trailing
+        // whitespace so the tail stays readable.
+        const cleaned = m.text.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim()
+        return `${m.role}: ${clipTail(cleaned, lastMessageChars)}`
+      }
+      return `${m.role}: ${clip(m.text.replace(/\s+/g, " ").trim(), olderMessageChars)}`
+    })
     .join("\n")
 }
 
