@@ -20,6 +20,11 @@ export type CoordinatorDeps = {
   log?(level: "info" | "warn" | "error", msg: string, data?: unknown): void
   // Test seam: override the IPC path (default: ipcPathFor(token)).
   ipcPath?: string
+  // Telegram long-poll server-side timeout in seconds (default 30).
+  pollTimeoutSec?: number
+  // Client-side watchdog in seconds after which a stalled long-poll request
+  // is aborted and retried (default pollTimeoutSec + 10).
+  pollWatchdogSec?: number
 }
 
 // Runs the update pump until `signal` aborts. Each update produced by the
@@ -60,9 +65,24 @@ async function runAsLeader(
 ): Promise<void> {
   let offset = 0
   const log = deps.log ?? (() => {})
+  // Telegram long-poll server-side timeout. We bound each client request to
+  // a little longer so a *stalled* (half-open) connection that never returns
+  // is aborted and retried instead of wedging the leader forever. Without
+  // this watchdog a dead socket can silently stop all polling while we still
+  // hold leadership, so followers stop receiving updates and Telegram looks
+  // "disconnected" even though the bot is technically up.
+  const pollTimeoutSec = deps.pollTimeoutSec ?? 30
+  const pollWatchdogMs = (deps.pollWatchdogSec ?? pollTimeoutSec + 10) * 1000
   while (!deps.signal.aborted) {
+    // Per-iteration abort controller, chained to the shared shutdown signal,
+    // that also fires if the request exceeds the watchdog window.
+    const pollAbort = new AbortController()
+    const onShutdown = () => pollAbort.abort()
+    deps.signal.addEventListener("abort", onShutdown, { once: true })
+    const watchdog = setTimeout(() => pollAbort.abort(), pollWatchdogMs)
+    watchdog.unref?.()
     try {
-      const updates = await deps.telegram.getUpdates(offset, 30, deps.signal)
+      const updates = await deps.telegram.getUpdates(offset, pollTimeoutSec, pollAbort.signal)
       for (const u of updates) {
         offset = Math.max(offset, u.update_id + 1)
         if (role && role.role === "leader") role.broadcast({ type: "update", data: u })
@@ -72,6 +92,9 @@ async function runAsLeader(
       if (deps.signal.aborted) break
       log("warn", "leader poll error, retrying in 5s", String(err))
       await sleep(5000, deps.signal)
+    } finally {
+      clearTimeout(watchdog)
+      deps.signal.removeEventListener("abort", onShutdown)
     }
   }
   if (role && role.role === "leader") await role.close().catch(() => {})
