@@ -110,13 +110,21 @@ as `chatId` for a private 1:1 chat with your own bot.
 
 ### 3. Install the plugin
 
-Add it to `~/.config/opencode/opencode.json`:
+Clone the repo, build the bundle, and reference it by absolute path in
+`~/.config/opencode/opencode.json`:
+
+```bash
+git clone https://github.com/m0wer/opencode-telegram-question.git
+cd opencode-telegram-question
+bun install
+bun run build   # produces dist/index.js
+```
 
 ```jsonc
 {
   "plugin": [
     [
-      "github:m0wer/opencode-telegram-question",
+      "/absolute/path/to/opencode-telegram-question/dist/index.js",
       {
         "botToken": "123456:AA...",
         "chatId": 987654321,
@@ -131,28 +139,16 @@ Add it to `~/.config/opencode/opencode.json`:
 }
 ```
 
-opencode resolves the spec through npm, which fetches the repo straight from
-GitHub. Pin a specific commit or tag with `github:m0wer/opencode-telegram-question#v0.4.1`.
-
-For local development, clone and reference the built file directly:
-
-```bash
-git clone https://github.com/m0wer/opencode-telegram-question.git
-cd opencode-telegram-question
-bun install
-bun run build
-```
-
-```jsonc
-{
-  "plugin": [
-    [
-      "/absolute/path/to/opencode-telegram-question/dist/index.js",
-      { "botToken": "...", "chatId": 0 }
-    ]
-  ]
-}
-```
+> **Why not `github:m0wer/...`?** It does not work with the current opencode.
+> opencode installs `github:` plugins by having npm's arborist **git-clone** the
+> repo on startup (`~/.cache/opencode/packages/<spec>/`). That clone takes ~4s,
+> but short-lived invocations (e.g. `opencode models`) dispose the instance before
+> it finishes, and arborist then **rolls back** the partial install (atomic
+> reify), leaving an empty cache dir. opencode also never cache-hits a `github:`
+> spec (`npm-package-arg` reports no package name), so it re-clones and loses the
+> race on every launch. A local path resolves with a cheap `stat` (no clone), so
+> it loads reliably. (Publishing to npm would also work — a tarball install has no
+> clone — but this project is intentionally not published.)
 
 ### 4. Credentials
 
