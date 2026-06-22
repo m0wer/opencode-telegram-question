@@ -110,21 +110,13 @@ as `chatId` for a private 1:1 chat with your own bot.
 
 ### 3. Install the plugin
 
-Clone the repo, build the bundle, and reference it by absolute path in
-`~/.config/opencode/opencode.json`:
-
-```bash
-git clone https://github.com/m0wer/opencode-telegram-question.git
-cd opencode-telegram-question
-bun install
-bun run build   # produces dist/index.js
-```
+Add the package name to `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
   "plugin": [
     [
-      "/absolute/path/to/opencode-telegram-question/dist/index.js",
+      "opencode-telegram-question",
       {
         "botToken": "123456:AA...",
         "chatId": 987654321,
@@ -139,16 +131,13 @@ bun run build   # produces dist/index.js
 }
 ```
 
-> **Why not `github:m0wer/...`?** It does not work with the current opencode.
-> opencode installs `github:` plugins by having npm's arborist **git-clone** the
-> repo on startup (`~/.cache/opencode/packages/<spec>/`). That clone takes ~4s,
-> but short-lived invocations (e.g. `opencode models`) dispose the instance before
-> it finishes, and arborist then **rolls back** the partial install (atomic
-> reify), leaving an empty cache dir. opencode also never cache-hits a `github:`
-> spec (`npm-package-arg` reports no package name), so it re-clones and loses the
-> race on every launch. A local path resolves with a cheap `stat` (no clone), so
-> it loads reliably. (Publishing to npm would also work — a tarball install has no
-> clone — but this project is intentionally not published.)
+opencode will install it automatically from npm on first run.
+
+> **Why not `github:m0wer/...`?** opencode installs `github:` plugins by having
+> npm's arborist git-clone the repo on startup. That clone takes ~4s, but
+> short-lived invocations (e.g. `opencode models`) dispose the instance before it
+> finishes, so arborist rolls back the partial install and the cache is left empty
+> on every launch. An npm tarball install has no clone and loads reliably.
 
 ### 4. Credentials
 
@@ -214,3 +203,29 @@ ordering, cancel/reject, CLI-answers-first cleanup, message edit-on-answer
 behavior, chat-id isolation, multi-session IPC leader election and
 broadcast, history part summarization (text/reasoning/tool titles), and
 permission allow-once/always/reject flows.
+
+## Publishing
+
+Publishing is done locally using npm's browser-based OAuth login (no long-lived
+tokens required).
+
+1. Bump the version in `package.json`.
+2. Commit and tag:
+   ```sh
+   git add package.json
+   git commit -m "chore: release v0.x.y"
+   git tag v0.x.y
+   ```
+3. Log in to npm (opens a browser tab for one-time OAuth):
+   ```sh
+   npm login --auth-type=web
+   ```
+4. Build and publish:
+   ```sh
+   npm run prepublishOnly   # typecheck + test + build
+   npm publish
+   ```
+5. Push the commit and tag:
+   ```sh
+   git push origin master --tags
+   ```
